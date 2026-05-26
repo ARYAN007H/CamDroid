@@ -53,6 +53,7 @@ struct V4l2PixFormat {
 #[repr(C)]
 struct V4l2Format {
     type_: u32,
+    _padding_align: u32, // Align the union to 8 bytes on 64-bit platforms
     fmt: V4l2PixFormat,
     // Padding to match the kernel's union size (200 bytes total for fmt).
     _padding: [u8; 200 - std::mem::size_of::<V4l2PixFormat>()],
@@ -75,6 +76,7 @@ fn open_v4l2_device(
     );
 
     let file = OpenOptions::new()
+        .read(true)
         .write(true)
         .open(device_path)
         .with_context(|| {
@@ -93,6 +95,7 @@ fn open_v4l2_device(
 
     let mut fmt = V4l2Format {
         type_: V4L2_BUF_TYPE_VIDEO_OUTPUT,
+        _padding_align: 0,
         fmt: V4l2PixFormat {
             width,
             height,
@@ -265,3 +268,45 @@ fn v4l2_writer_loop(
     info!("v4l2 writer: {} total frames written", frames_written);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_v4l2_format_layout() {
+        assert_eq!(std::mem::size_of::<V4l2PixFormat>(), 48);
+        assert_eq!(std::mem::size_of::<V4l2Format>(), 208);
+        
+        // Let's verify the offsets in Rust
+        let dummy = V4l2Format {
+            type_: 0,
+            _padding_align: 0,
+            fmt: V4l2PixFormat {
+                width: 0,
+                height: 0,
+                pixelformat: 0,
+                field: 0,
+                bytesperline: 0,
+                sizeimage: 0,
+                colorspace: 0,
+                priv_: 0,
+                flags: 0,
+                encoding_or_ycbcr: 0,
+                quantization: 0,
+                xfer_func: 0,
+            },
+            _padding: [0u8; 152],
+        };
+        
+        let base_ptr = &dummy as *const V4l2Format as usize;
+        let fmt_ptr = &dummy.fmt as *const V4l2PixFormat as usize;
+        let width_ptr = &dummy.fmt.width as *const u32 as usize;
+        let pixelformat_ptr = &dummy.fmt.pixelformat as *const u32 as usize;
+        
+        assert_eq!(fmt_ptr - base_ptr, 8);
+        assert_eq!(width_ptr - base_ptr, 8);
+        assert_eq!(pixelformat_ptr - base_ptr, 16);
+    }
+}
+

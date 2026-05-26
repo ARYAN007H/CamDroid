@@ -90,9 +90,11 @@ class CameraManager(private val context: Context) {
      * @param useFront Whether to use the front camera
      * @param targetFps Target frame rate
      */
+
+
     @Suppress("MissingPermission")
     suspend fun openCamera(
-        previewSurface: Surface,
+        previewSurface: Surface?,
         encoderSurface: Surface,
         useFront: Boolean = false,
         targetFps: Int = 60
@@ -128,7 +130,7 @@ class CameraManager(private val context: Context) {
 
         // Create capture request with both surfaces as targets
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-            addTarget(previewSurface)
+            previewSurface?.let { addTarget(it) }
             addTarget(encoderSurface)
 
             // Auto focus
@@ -147,26 +149,35 @@ class CameraManager(private val context: Context) {
         }
         captureRequestBuilder = builder
 
-        // Create capture session with both output surfaces
+        // Create capture session with output surfaces
         val session = suspendCancellableCoroutine<CameraCaptureSession> { cont ->
-            val outputs = listOf(
-                OutputConfiguration(previewSurface),
-                OutputConfiguration(encoderSurface)
-            )
-            val sessionConfig = SessionConfiguration(
-                SessionConfiguration.SESSION_REGULAR,
-                outputs,
-                { it.run() },
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        cont.resume(session)
-                    }
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        if (cont.isActive) cont.resumeWithException(Exception("Session configure failed"))
-                    }
+            val callback = object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: CameraCaptureSession) {
+                    cont.resume(session)
                 }
-            )
-            device.createCaptureSession(sessionConfig)
+                override fun onConfigureFailed(session: CameraCaptureSession) {
+                    if (cont.isActive) cont.resumeWithException(Exception("Session configure failed"))
+                }
+            }
+
+            val targets = buildList {
+                previewSurface?.let { add(it) }
+                add(encoderSurface)
+            }
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                val outputs = targets.map { android.hardware.camera2.params.OutputConfiguration(it) }
+                val sessionConfig = android.hardware.camera2.params.SessionConfiguration(
+                    android.hardware.camera2.params.SessionConfiguration.SESSION_REGULAR,
+                    outputs,
+                    { command -> cameraHandler?.post(command) ?: command.run() },
+                    callback
+                )
+                device.createCaptureSession(sessionConfig)
+            } else {
+                @Suppress("DEPRECATION")
+                device.createCaptureSession(targets, callback, cameraHandler)
+            }
         }
         captureSession = session
 
@@ -243,6 +254,19 @@ class CameraManager(private val context: Context) {
     fun setExposureCompensation(ev: Int) {
         val builder = captureRequestBuilder ?: return
         builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, ev)
+        applySettings()
+    }
+
+    /** Set manual ISO and Shutter Speed. Pass null to return to auto exposure. */
+    fun setManualExposure(iso: Int?, shutterSpeedNs: Long?) {
+        val builder = captureRequestBuilder ?: return
+        if (iso == null && shutterSpeedNs == null) {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        } else {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            iso?.let { builder.set(CaptureRequest.SENSOR_SENSITIVITY, it) }
+            shutterSpeedNs?.let { builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
+        }
         applySettings()
     }
 

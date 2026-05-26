@@ -1,54 +1,67 @@
-# <p align="center">📸 CamDroid</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/google/material-design-icons/master/png/device/videocam/materialiconssharp/240dp/2x/sharp_videocam_black_24dp.png" width="120" height="120" alt="CamDroid Logo">
+</p>
+
+# <p align="center">🎥 CamDroid</p>
 
 <p align="center">
-  <strong>High-performance, ultra-low latency wireless & USB webcam system for Linux.</strong>
+  <strong>Turn your Android device into a high-performance, ultra-low latency virtual webcam & microphone for Linux.</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Language-Rust%20%7C%20Kotlin-orange?style=for-the-badge&logo=rust" alt="Languages">
-  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Android-green?style=for-the-badge&logo=linux" alt="Platforms">
-  <img src="https://img.shields.io/badge/Video-4K%20%40%2060fps-purple?style=for-the-badge" alt="Video">
-  <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License">
+  <a href="https://github.com/rust-lang/rust"><img src="https://img.shields.io/badge/Companion-Rust%20%7C%20FFmpeg-cyan?style=for-the-badge&logo=rust" alt="Rust"></a>
+  <a href="https://kotlinlang.org/"><img src="https://img.shields.io/badge/App-Kotlin%20%7C%20Compose-purple?style=for-the-badge&logo=kotlin" alt="Kotlin"></a>
+  <a href="https://www.linux.org/"><img src="https://img.shields.io/badge/OS-Linux%20Webcam-orange?style=for-the-badge&logo=linux" alt="Linux"></a>
+  <a href="https://github.com/v4l2loopback/v4l2loopback"><img src="https://img.shields.io/badge/Driver-v4l2loopback-blue?style=for-the-badge" alt="v4l2loopback"></a>
+</p>
+
+<p align="center">
+  ⚡ <b>Near-Zero Latency (~30ms)</b> • 📺 <b>Up to 4K @ 60 FPS</b> • 🎙️ <b>AAC Audio</b> • 🔌 <b>WiFi & USB</b> • 🎮 <b>Interactive CLI Console</b>
 </p>
 
 ---
 
-CamDroid is a production-grade, open-source alternative to proprietary webcam apps. It transforms your Android phone into a high-definition webcam and virtual microphone for your Linux PC. Seamlessly connect via **WiFi (mDNS)** or **USB (ADB)** and capture professional-quality **1080p, 2K, or 4K video at 60 FPS** with hardware-accelerated video/audio encoding.
+## 🌟 Why CamDroid?
 
-It features zero watermarks, zero limits, and a native **Rust desktop companion** for near-zero overhead.
+**CamDroid** is a high-fidelity, open-source replacement for proprietary webcam apps like DroidCam and Iriun. By eliminating heavy media frameworks, it directly streams raw, hardware-encoded video and audio packets from Android to a virtual webcam device on Linux.
+
+* **No Watermarks / No Limits:** Free and open source forever under the MIT license.
+* **Extreme Performance:** Native Rust companion decoder utilizes FFmpeg libraries directly for sub-millisecond decode times.
+* **Studio Grade:** Supports up to 4K video streams at 60 FPS with adaptive bitrate control.
+* **Full Remote Control:** Control the camera (zoom, focus, exposure, flash, mirror) directly from your computer terminal.
 
 ---
 
-## ⚡ How it Compares
+## ⚡ Feature Comparison
 
-Here is how CamDroid matches up against industry standards:
-
-| Feature | **CamDroid** 📸 | **DroidCam (Free)** | **DroidCam (Premium)** | **OBS Ninja (VDO.ninja)** |
+| Feature | **CamDroid 📸** | DroidCam (Free) | DroidCam (Premium) | VDO.ninja |
 | :--- | :---: | :---: | :---: | :---: |
-| **Max Resolution** | **4K (2160p)** | 480p | 1080p | 1080p (network limited) |
-| **Max Frame Rate** | **60 FPS** ⚡ | 30 FPS | 30 FPS | 30 / 60 FPS |
-| **Supported Codecs** | **H.264 / H.265 / MJPEG** | H.264 | H.264 | VP8 / VP9 / H.264 |
-| **Audio Support** | **AAC-LC (Hardware)** | Low Quality Mono | Standard Mono | Opus |
-| **Connection Protocol** | **Custom TCP Binary** | TCP | TCP | WebRTC |
-| **Latency** | **~30–50ms (Low)** | ~70–120ms | ~70–120ms | ~150–300ms |
-| **Remote Controls** | **Yes (Interactive CLI)** | No | Web UI Only | No |
-| **Bitrate Management** | **Adaptive + Manual** | Fixed | Fixed | WebRTC-based |
-| **Open Source / Free** | **100% MIT License** | Ads / Basic | Paid ($) | Free |
+| **Max Resolution** | 💎 **4K (2160p)** | 480p | 1080p | 1080p (dependent on web) |
+| **Max Frame Rate** | ⚡ **60 FPS** | 30 FPS | 30 FPS | 30 / 60 FPS |
+| **Video Codecs** | **H.264 / H.265 / MJPEG** | H.264 | H.264 | VP8 / VP9 / H.264 |
+| **Audio Quality** | 🎙️ **AAC-LC (Hardware)** | Low-Q Mono | Standard Mono | Opus |
+| **Latency** | 🏎️ **~30–50ms** | ~70–120ms | ~70–120ms | ~150–300ms |
+| **Remote Controls**| 🎮 **Yes (Interactive CLI)** | No | Web UI Only | No |
+| **Bandwidth Mode** | 📈 **Adaptive + Manual** | Fixed | Fixed | WebRTC Adaptive |
+| **Open Source** | 🔓 **Yes (MIT)** | No (Ads) | No (Paid) | Yes |
 
 ---
 
 ## 🏗️ Architecture & Data Flow
 
-CamDroid is designed to bypass standard media framework overhead by pushing raw compressed NAL units directly over a dedicated TCP stream.
-
 ```mermaid
 flowchart TD
+    %% Styling
+    classDef phone fill:#5d3fd3,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef pc fill:#00E5FF,stroke:#fff,stroke-width:2px,color:#000;
+    classDef net fill:#333,stroke:#ccc,stroke-width:1px,color:#fff;
+
     subgraph Phone ["📱 Android Transmitter"]
-        Camera[Camera2 API] -->|Raw YUV/OES| VEnc[MediaCodec Video Encoder]
+        Camera[Camera2 API] -->|Raw YUV / OES| VEnc[MediaCodec Video Encoder]
         Mic[AudioRecord] -->|PCM Audio| AEnc[MediaCodec Audio Encoder]
         VEnc -->|H.264 / H.265 / MJPEG NALs| Server[Custom TCP Server :4747]
         AEnc -->|AAC-LC ADTS Frames| Server
-        NSD[NsdManager] -->|Broadcasts _camdroid._tcp| mDNS
+        NSD[NsdManager] -->|Broadcasts _camdroid._tcp| mDNS[Local mDNS]
     end
 
     Server -->|WiFi TCP Socket / ADB Port Forwarding| Client["🦀 Rust Desktop Client (Receiver)"]
@@ -58,15 +71,19 @@ flowchart TD
         Demux -->|Video Stream| VDec[FFmpeg Video Decoder]
         Demux -->|Audio Stream| ADec[FFmpeg AAC Decoder]
         
-        VDec -->|swscale YUYV422| V4L2[v4l2loopback Device /dev/video10]
+        VDec -->|swscale YUYV422| V4L2[v4l2loopback /dev/video10]
         ADec -->|swresample PCM| Pulse[PulseAudio Null Sink]
         
         Stdin[Stdin Command Reader] -->|ControlCommand JSON| Client
     end
 
     Client -->|TCP Control Socket| Server
-    V4L2 -->|V4L2 Video Source| OBS["🎥 OBS Studio / Zoom / Discord"]
+    V4L2 -->|V4L2 Video Source| OBS["🎥 OBS Studio / Zoom / Discord / Webapps"]
     Pulse -->|Pulse Loopback Source| OBS
+
+    class Camera,VEnc,Mic,AEnc,Server,NSD phone;
+    class Client,Demux,VDec,ADec,V4L2,Pulse,Stdin,OBS pc;
+    class mDNS net;
 ```
 
 ---
@@ -74,37 +91,31 @@ flowchart TD
 ## ✨ Features Checklist
 
 ### 📹 Video & Encoding
-- **Ultra-HD Resolution:** Real-time capture up to **4K (2160p)** and **1440p**.
-- **Smooth Motion:** Streams at **60 FPS** (with dynamic fallback to 30 FPS if not supported by hardware).
-- **Multiple Codecs:** Hardcoded hardware support for **H.264 (AVC)**, **H.265 (HEVC)**, and **MJPEG**.
-- **Adaptive Bitrate:** On-the-fly network bandwidth and battery health monitoring adjustments.
-- **On-Demand Keyframe:** Manually request IDR frames from the CLI to clear up stream corruption.
+* **Ultra-HD Resolution:** Real-time capture at **4K (2160p)**, **1440p**, and **1080p**.
+* **Ultra-Fluid Motion:** Supports **60 FPS** with dynamic fallback to 30 FPS.
+* **Codecs:** Hardware-accelerated **H.264 (AVC)**, **H.265 (HEVC)**, and **MJPEG** encoding.
+* **Adaptive Bitrate:** Dynamic network throughput monitoring adjustments to prevent stuttering.
+* **On-Demand Keyframe:** Manually request IDR frames to instantly clear up macroblocking.
 
 ### 🎙️ Audio Pipeline
-- **Hardware AAC-LC:** High-fidelity audio compression from the phone mic.
-- **Null Sink Integration:** Automatically provisions a PulseAudio source (`CamDroid_Microphone`) that feeds into any Linux capture program.
+* **Hardware AAC-LC:** High-fidelity microphone streaming from your phone.
+* **Null Sink Integration:** Automatically registers a virtual PulseAudio device (`CamDroid_Microphone`) for system-wide input.
 
-### 🎮 Camera Live Controls
-- 🔍 **Smooth Digital Zoom:** Granular scale settings.
-- 🎯 **Advanced Focusing:** Choose between auto-focus and manual focus (specified in diopters).
-- ☀️ **Exposure Adjust:** Fine-tune brightness in real-time (-4 to +4 EV).
-- 🎨 **White Balance Presets:** Switch modes (auto, daylight, tungsten, fluorescent, cloudy).
-- 🔦 **Flashlight Control:** Remote torch activation.
-- 🪞 **Horizontal Mirroring:** Flip front camera feeds for natural framing.
-- 🔄 **Sensor Toggle:** Instantly switch between front and rear cameras.
-
-### 🔌 Connectivity
-- **mDNS Auto-Discovery:** Instant zero-configuration pairing over local WiFi networks.
-- **USB ADB Forwarding:** Direct cable link with auto ADB port-forward provisioning for ultra-stable latency.
-- **Background Mode:** Keeps the camera capturing and streaming even with the phone screen locked.
-- **Battery Optimizer:** Limits FPS and resolution when battery falls below 20%.
+### 🎮 Camera Live Controls (Directly from Terminal CLI!)
+* 🔍 **Smooth Digital Zoom:** Granular magnification ratios.
+* 🎯 **Manual & Auto Focus:** Focus in diopters or trigger auto-focus locks.
+* ☀️ **Exposure Adjust:** Fine-tune brightness in real-time (-4 to +4 EV).
+* 🎨 **White Balance Presets:** Switch modes (auto, daylight, tungsten, fluorescent, cloudy).
+* 🔦 **Flashlight Control:** Remote torch activation.
+* 🪞 **Horizontal Mirroring:** Flip front camera feeds for natural framing.
+* 🔄 **Sensor Toggle:** Instantly switch between front and rear cameras.
 
 ---
 
 ## 🚀 Quick Start Guide
 
 ### 1. Install Desktop Dependencies (One-time)
-A helper script is provided to set up dependencies and load `v4l2loopback` with optimal settings. Run the setup script:
+A helper script is provided to set up dependencies and load `v4l2loopback` with optimal settings:
 
 ```bash
 cd desktop
@@ -132,33 +143,36 @@ cd ../android
 
 ## 🔌 Running the System
 
-### WiFi Mode (Auto-Discovery)
+### 🔌 USB Mode (ADB Port Forwarding) — [Recommended ⚡]
+1. Connect the phone to your PC via a USB cable.
+2. Verify ADB detects it (`adb devices`).
+3. Run the client with the USB flag (it will automatically configure ADB port forwarding):
+   ```bash
+   cd desktop
+   ./target/release/camdroid-client --usb
+   ```
+
+### 📶 WiFi Mode (Auto-Discovery)
 1. Launch the **CamDroid** app on your phone.
-2. Turn on the server toggle.
+2. Tap the large center button to start the streaming server.
 3. Start the client on your PC to auto-detect and connect:
    ```bash
+   cd desktop
    ./target/release/camdroid-client --discover
    ```
 
-### WiFi Mode (Direct IP Connection)
-If your network blocks multicast/mDNS, connect directly by inputting the IP shown on the phone:
+### 📶 WiFi Mode (Direct IP Connection)
+If your network blocks multicast/mDNS, connect directly by inputting the IP address displayed on the phone:
 ```bash
-./target/release/camdroid-client --connect 192.168.1.42:4747
+cd desktop
+./target/release/camdroid-client --connect 192.168.1.67:4747
 ```
-
-### USB Mode (ADB Port Forwarding)
-1. Connect the phone to your PC via a USB cable.
-2. Verify ADB detects it (`adb devices`).
-3. Run the client with the USB flag:
-   ```bash
-   ./target/release/camdroid-client --usb
-   ```
 
 ---
 
 ## 🎮 Live Remote Control Console
 
-Once the client successfully connects, it prints the status and opens a persistent terminal prompt (`camdroid>`). You can enter commands to adjust the camera configuration on-the-fly without touching the phone:
+Once the client connects, it opens a persistent command shell (`camdroid>`) in your terminal. You can adjust the camera settings on the phone in real-time:
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -190,7 +204,7 @@ Once the client successfully connects, it prints the status and opens a persiste
 ```
 
 > [!TIP]
-> Use `keyframe` (or `idr`) if you experience macroblocking or transient stream artifacts over highly congested WiFi networks. This forces the Android encoder to immediately generate a fresh reference frame.
+> If you experience transient video artifacts or macroblocking over crowded WiFi channels, type `keyframe` (or `idr`) in the prompt. This forces the Android encoder to emit a fresh, independent reference frame to clean up the screen.
 
 ---
 
@@ -217,32 +231,28 @@ OPTIONS:
 ## 🛠️ Troubleshooting
 
 ### 1. `Virtual camera device: /dev/video10 not found`
-If the `/dev/video10` interface is missing:
-- Verify that `v4l2loopback` is installed on your Linux kernel.
-- Run the setup script again or load it manually:
+* Verify that `v4l2loopback` is successfully loaded:
+  ```bash
+  lsmod | grep v4l2loopback
+  ```
+* Load the module manually with exclusive capabilities (needed for Google Chrome/Zoom):
   ```bash
   sudo modprobe v4l2loopback exclusive_caps=1 video_nr=10 card_label="CamDroid"
   ```
 
 ### 2. PulseAudio Virtual Microphone Not Showing Up
-CamDroid needs write permissions to the PulseAudio daemon to create a Null Sink. 
-- If you use **PipeWire**, ensure the `pipewire-pulse` compatibility layer is running:
+* Make sure `pipewire-pulse` compatibility layer is running if you use **PipeWire**:
   ```bash
   systemctl --user status pipewire-pulse
   ```
-- If audio is distorted, check if the client logs report frame drop issues, and ensure the phone's microphone permission is granted.
+* If audio is distorted, verify that client logs do not indicate frame overflows, and check that the microphone permission was granted on your phone.
 
 ### 3. USB Connection Fails
-- Ensure **USB Debugging** is toggled on inside your phone's Developer Options.
-- Try running `adb devices` in your terminal. You must authorize the computer's RSA key on the device screen.
-- Make sure no other instances of ADB forwarders are blocking port `4747`.
-
----
-
-## 📄 Protocol Spec
-For developers wanting to build their own client or transmitter wrappers, see the detailed custom packet header layout in [PROTOCOL.md](file:///home/aryan/Documents/projects/CamDroid/protocol/PROTOCOL.md).
+* Make sure **USB Debugging** is turned on inside the phone's Developer Options.
+* Run `adb devices` in a terminal on your computer. Make sure your phone doesn't say `unauthorized` and that you accepted the USB debugging prompt on the phone screen.
+* Ensure no other clients or ADB tunnels are blocking port `4747`.
 
 ---
 
 ## 📜 License
-This project is licensed under the MIT License. See [LICENSE](file:///home/aryan/Documents/projects/CamDroid/LICENSE) for more details.
+This project is licensed under the MIT License. See [LICENSE](file:///home/aryan/Documents/projects/CamDroid/LICENSE) for details.

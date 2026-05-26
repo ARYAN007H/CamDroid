@@ -36,6 +36,9 @@ class BatteryMonitor(private val context: Context) {
                 isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                         status == BatteryManager.BATTERY_STATUS_FULL
 
+                com.camdroid.StreamingController.batteryLevel.value = batteryLevel
+                com.camdroid.StreamingController.isCharging.value = isCharging
+
                 if (batteryLevel <= LOW_BATTERY_THRESHOLD && !isCharging && !lowBatteryTriggered) {
                     lowBatteryTriggered = true
                     Log.w(TAG, "Low battery: $batteryLevel% — triggering power saver")

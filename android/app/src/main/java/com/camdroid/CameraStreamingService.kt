@@ -130,6 +130,80 @@ class CameraStreamingService : LifecycleService() {
         if (isStreaming.getAndSet(true)) return
         Log.i(TAG, "Starting streaming pipeline...")
 
+        StreamingController.isStreaming.value = true
+        StreamingController.useFrontCamera.value = useFrontCamera
+
+        // Setup event listeners for double-direction controls sync
+        StreamingController.onZoomChanged = { ratio ->
+            cameraManager?.setZoom(ratio)
+            StreamingController.currentZoom.value = ratio
+        }
+        StreamingController.onFocusChanged = { mode, dist ->
+            cameraManager?.setFocus(mode, dist)
+            StreamingController.focusMode.value = mode
+            StreamingController.focusDistance.value = dist
+        }
+        StreamingController.onExposureChanged = { ev ->
+            cameraManager?.setExposureCompensation(ev)
+            StreamingController.exposureCompensation.value = ev
+        }
+        StreamingController.onManualExposureChanged = { iso, shutter ->
+            cameraManager?.setManualExposure(iso, shutter)
+            if (iso == null && shutter == null) {
+                StreamingController.exposureMode.value = "auto"
+            } else {
+                StreamingController.exposureMode.value = "manual"
+                iso?.let { StreamingController.manualIso.value = it }
+                shutter?.let { StreamingController.manualShutterSpeedNs.value = it }
+            }
+        }
+        StreamingController.onWhiteBalanceChanged = { mode ->
+            cameraManager?.setWhiteBalance(mode)
+            StreamingController.whiteBalanceMode.value = mode
+        }
+        StreamingController.onFlashChanged = { enabled ->
+            cameraManager?.setFlash(enabled)
+            StreamingController.flashEnabled.value = enabled
+        }
+        StreamingController.onCameraToggle = { useFront ->
+            lifecycleScope.launch {
+                useFrontCamera = useFront
+                StreamingController.useFrontCamera.value = useFront
+                restartCamera()
+            }
+        }
+        StreamingController.onPreviewSurfaceChanged = {
+            if (isStreaming.get()) {
+                lifecycleScope.launch {
+                    restartCamera()
+                }
+            }
+        }
+
+        // Stats monitoring coroutine
+        lifecycleScope.launch {
+            var lastCount = 0L
+            var lastTime = System.currentTimeMillis()
+            while (isStreaming.get()) {
+                delay(1000)
+                val currentCount = frameCount.get()
+                val currentTime = System.currentTimeMillis()
+                val deltaFrames = currentCount - lastCount
+                val deltaTimeMs = currentTime - lastTime
+                if (deltaTimeMs > 0) {
+                    val fps = (deltaFrames * 1000f) / deltaTimeMs
+                    StreamingController.currentFps.value = fps
+                    
+                    // Simple bitrate calculation in Mbps
+                    val typicalSizeBits = 100000 * 8L // 100KB frame
+                    val bps = (deltaFrames * typicalSizeBits * 1000f) / deltaTimeMs
+                    StreamingController.currentBitrate.value = bps / 1_000_000f
+                }
+                lastCount = currentCount
+                lastTime = currentTime
+            }
+        }
+
         // Acquire wake lock
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CamDroid::StreamWake").apply { acquire() }
@@ -139,7 +213,6 @@ class CameraStreamingService : LifecycleService() {
             onLowBattery = {
                 Log.w(TAG, "Low battery — reducing quality")
                 lifecycleScope.launch {
-                    // Reduce bitrate by 50% on low battery
                     videoEncoder?.updateBitrate(currentConfig.bitrate / 2)
                 }
             }
@@ -154,6 +227,7 @@ class CameraStreamingService : LifecycleService() {
                 lifecycleScope.launch { onClientConnected() }
             },
             onClientDisconnected = {
+                StreamingController.isConnected.value = false
                 updateNotification("Waiting for client...")
             }
         ).also { it.start(lifecycleScope) }
@@ -171,6 +245,7 @@ class CameraStreamingService : LifecycleService() {
 
     private suspend fun onClientConnected() {
         Log.i(TAG, "Client connected, starting encoder and camera...")
+        StreamingController.isConnected.value = true
 
         // Send server capabilities
         val capabilities = JsonObject().apply {
@@ -214,17 +289,19 @@ class CameraStreamingService : LifecycleService() {
     }
 
     private suspend fun startCamera(encoderSurface: Surface) {
-        // Create a dummy SurfaceTexture for the preview output.
-        // In the full app, this would be connected to the Compose preview.
-        val texId = 0 // Dummy texture ID
-        previewSurfaceTexture = SurfaceTexture(texId).apply {
-            setDefaultBufferSize(currentConfig.resolution.width, currentConfig.resolution.height)
+        val previewSurf = StreamingController.activePreviewSurface
+        if (previewSurf != null) {
+            Log.i(TAG, "Starting camera with active preview surface")
+        } else {
+            Log.i(TAG, "Starting camera WITHOUT preview surface (dim/background mode)")
         }
-        previewSurface = Surface(previewSurfaceTexture)
 
         cameraManager = CameraManager(this).apply {
             initialize()
-            openCamera(previewSurface!!, encoderSurface, useFrontCamera, currentConfig.fps)
+            openCamera(previewSurf, encoderSurface, useFrontCamera, currentConfig.fps)
+            
+            // Sync camera limits to controller
+            StreamingController.maxZoom.value = maxZoom
         }
         Log.i(TAG, "Camera started")
     }
@@ -237,33 +314,41 @@ class CameraStreamingService : LifecycleService() {
             "switch_camera" -> {
                 lifecycleScope.launch {
                     useFrontCamera = !useFrontCamera
+                    StreamingController.useFrontCamera.value = useFrontCamera
                     restartCamera()
                 }
             }
             "set_zoom" -> {
                 val value = cmd.get("value")?.asFloat ?: return
                 cameraManager?.setZoom(value)
+                StreamingController.currentZoom.value = value
             }
             "set_focus" -> {
                 val mode = cmd.get("mode")?.asString ?: return
-                val distance = cmd.get("distance")?.asFloat
+                val distance = cmd.get("distance")?.asFloat ?: 0f
                 cameraManager?.setFocus(mode, distance)
+                StreamingController.focusMode.value = mode
+                StreamingController.focusDistance.value = distance
             }
             "set_exposure" -> {
                 val comp = cmd.get("compensation")?.asInt ?: return
                 cameraManager?.setExposureCompensation(comp)
+                StreamingController.exposureCompensation.value = comp
             }
             "set_white_balance" -> {
                 val mode = cmd.get("mode")?.asString ?: return
                 cameraManager?.setWhiteBalance(mode)
+                StreamingController.whiteBalanceMode.value = mode
             }
             "set_flash" -> {
                 val enabled = cmd.get("enabled")?.asBoolean ?: return
                 cameraManager?.setFlash(enabled)
+                StreamingController.flashEnabled.value = enabled
             }
             "set_mirror" -> {
                 val enabled = cmd.get("enabled")?.asBoolean ?: return
                 cameraManager?.setMirror(enabled)
+                StreamingController.mirrorEnabled.value = enabled
             }
             "set_resolution" -> {
                 val value = cmd.get("value")?.asString ?: return
@@ -325,14 +410,25 @@ class CameraStreamingService : LifecycleService() {
 
     private fun stopStreaming() {
         isStreaming.set(false)
+        StreamingController.isStreaming.value = false
+        StreamingController.isConnected.value = false
+        
+        // Remove listeners
+        StreamingController.onZoomChanged = null
+        StreamingController.onFocusChanged = null
+        StreamingController.onExposureChanged = null
+        StreamingController.onManualExposureChanged = null
+        StreamingController.onWhiteBalanceChanged = null
+        StreamingController.onFlashChanged = null
+        StreamingController.onCameraToggle = null
+        StreamingController.onPreviewSurfaceChanged = null
+
         cameraManager?.close()
         videoEncoder?.stop()
         audioEncoder?.stop()
         streamServer?.stop()
         nsdHelper?.unregisterService()
         batteryMonitor?.stopMonitoring()
-        previewSurface?.release()
-        previewSurfaceTexture?.release()
         wakeLock?.let { if (it.isHeld) it.release() }
         Log.i(TAG, "Streaming stopped")
     }

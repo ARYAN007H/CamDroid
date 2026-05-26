@@ -98,11 +98,7 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                     debug!("mDNS search stopped");
                 }
             },
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                break;
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                warn!("mDNS receiver disconnected unexpectedly");
+            Err(_) => {
                 break;
             }
         }
