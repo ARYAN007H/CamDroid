@@ -1,0 +1,33 @@
+{
+  "productName": "CamDroid",
+  "version": "2.0.0",
+  "identifier": "com.camdroid.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "title": "CamDroid",
+    "windows": [
+      {
+        "title": "CamDroid",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

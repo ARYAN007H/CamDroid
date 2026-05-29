@@ -1,0 +1,28 @@
+[package]
+name = "camdroid-gui"
+version = "2.0.0"
+edition = "2021"
+description = "CamDroid Desktop GUI — companion app for the CamDroid Android webcam"
+license = "MIT"
+
+[lib]
+name = "camdroid_gui_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+
+camdroid-client = { path = "../../desktop" }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

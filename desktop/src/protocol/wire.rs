@@ -219,6 +219,20 @@ pub struct ServerCapabilities {
     pub battery: u32,
 }
 
+impl Default for ServerCapabilities {
+    fn default() -> Self {
+        Self {
+            version: "unknown".to_string(),
+            device: "unknown".to_string(),
+            codecs: vec!["h264".to_string()],
+            resolutions: vec!["1080p".to_string()],
+            fps: vec![30, 60],
+            audio: true,
+            battery: 100,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
