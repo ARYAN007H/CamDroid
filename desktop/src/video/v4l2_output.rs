@@ -5,7 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::Receiver;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
