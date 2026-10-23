@@ -19,6 +19,7 @@ import androidx.lifecycle.lifecycleScope
 import com.camdroid.camera.CameraManager
 import com.camdroid.encoder.*
 import com.camdroid.network.NsdHelper
+import com.camdroid.network.MediaSender
 import com.camdroid.network.StreamServer
 import com.camdroid.util.BatteryMonitor
 import com.camdroid.util.NetworkUtils
@@ -50,6 +51,7 @@ class CameraStreamingService : LifecycleService() {
     private var cameraManager: CameraManager? = null
     private var videoEncoder: VideoEncoder? = null
     private var audioEncoder: AudioEncoder? = null
+    private var mediaSender: MediaSender? = null
     private var streamServer: StreamServer? = null
     private var nsdHelper: NsdHelper? = null
     private var batteryMonitor: BatteryMonitor? = null
@@ -68,6 +70,7 @@ class CameraStreamingService : LifecycleService() {
     private val frameCount = AtomicLong(0)
     private val isStreaming = AtomicBoolean(false)
     private val nextSessionId = AtomicLong(1)
+    private var activeSessionId = 0L
 
     private val gson = Gson()
 
@@ -273,13 +276,16 @@ class CameraStreamingService : LifecycleService() {
 
     private suspend fun startAcceptedStream() {
         if (videoEncoder != null) return
+        mediaSender = MediaSender(activeSessionId, writeMedia = { packet ->
+            streamServer?.sendV2Packet(packet)
+        }).also { it.start() }
 
         // Start video encoder
         videoEncoder = VideoEncoder(currentConfig) { data, isConfig, isKeyFrame, pts ->
             if (isConfig) {
-                streamServer?.sendVideoConfig(data)
+                mediaSender?.offerVideo(data, pts * 1_000L, isConfig = true)
             } else {
-                streamServer?.sendVideoFrame(data)
+                mediaSender?.offerVideo(data, pts * 1_000L, isKeyFrame = isKeyFrame)
                 frameCount.incrementAndGet()
             }
         }.also { it.start() }
@@ -288,9 +294,9 @@ class CameraStreamingService : LifecycleService() {
         if (audioEnabled) {
             audioEncoder = AudioEncoder { data, isConfig, pts ->
                 if (isConfig) {
-                    streamServer?.sendAudioConfig(data)
+                    mediaSender?.offerAudio(data, pts * 1_000L, isConfig = true)
                 } else {
-                    streamServer?.sendAudioFrame(data)
+                    mediaSender?.offerAudio(data, pts * 1_000L)
                 }
             }.also { it.start() }
         }
@@ -426,8 +432,9 @@ class CameraStreamingService : LifecycleService() {
                     return
                 }
                 currentConfig = currentConfig.copy(bitrate = bitrate)
+                activeSessionId = nextSessionId.getAndIncrement()
                 val accepted = JsonObject().apply {
-                    addProperty("session_id", nextSessionId.getAndIncrement())
+                    addProperty("session_id", activeSessionId)
                     add("config", config)
                     addProperty("audio_enabled", audio)
                 }
@@ -494,6 +501,8 @@ class CameraStreamingService : LifecycleService() {
         cameraManager?.close()
         videoEncoder?.stop()
         audioEncoder?.stop()
+        mediaSender?.stop()
+        mediaSender = null
         streamServer?.stop()
         nsdHelper?.unregisterService()
         batteryMonitor?.stopMonitoring()

@@ -171,6 +171,19 @@ class StreamServer(
         sendPacket(ProtocolHandler.HEARTBEAT, ByteArray(0))
     }
 
+    /** Called only by MediaSender's worker; never from an encoder callback. */
+    fun sendV2Packet(packet: ProtocolV2.Packet) {
+        val out = outputStream ?: return
+        synchronized(writeLock) {
+            try {
+                ProtocolV2.writeTo(out, packet)
+                out.flush()
+            } catch (e: Exception) {
+                Log.d(TAG, "v2 send failed (client may have disconnected): ${e.message}")
+            }
+        }
+    }
+
     private fun sendPacket(type: Byte, payload: ByteArray) {
         val out = outputStream ?: return
         synchronized(writeLock) {

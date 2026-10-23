@@ -2,7 +2,9 @@ package com.camdroid.encoder
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -47,6 +49,8 @@ class VideoEncoder(
         handlerThread = HandlerThread("VideoEncoder").also { it.start() }
         handler = Handler(handlerThread!!.looper)
 
+        val codecInfo = findEncoder(config.codec.mimeType)
+        val codecCapabilities = codecInfo.getCapabilitiesForType(config.codec.mimeType)
         val format = MediaFormat.createVideoFormat(
             config.codec.mimeType,
             config.resolution.width,
@@ -57,6 +61,18 @@ class VideoEncoder(
             setInteger(MediaFormat.KEY_FRAME_RATE, config.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, config.iFrameInterval)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            if (config.codec == VideoCodecType.H264) {
+                val baseline = codecCapabilities.profileLevels.firstOrNull {
+                    it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                }
+                if (baseline != null) {
+                    setInteger(MediaFormat.KEY_PROFILE, baseline.profile)
+                    setInteger(MediaFormat.KEY_LEVEL, baseline.level)
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            }
         }
 
         val codec = MediaCodec.createEncoderByType(config.codec.mimeType)
@@ -124,16 +140,20 @@ class VideoEncoder(
             val outputBuffer = codec.getOutputBuffer(index) ?: return
 
             try {
+                val encoded = outputBuffer.duplicate().apply {
+                    position(info.offset)
+                    limit(info.offset + info.size)
+                }
                 if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                     // Codec configuration data (SPS/PPS for H.264, VPS/SPS/PPS for H.265)
                     val configData = ByteArray(info.size)
-                    outputBuffer.get(configData)
+                    encoded.get(configData)
                     codecConfigData = configData
                     onEncodedData(configData, true, false, info.presentationTimeUs)
                 } else if (info.size > 0) {
                     val isKeyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                     val frameData = ByteArray(info.size)
-                    outputBuffer.get(frameData)
+                    encoded.get(frameData)
                     onEncodedData(frameData, false, isKeyFrame, info.presentationTimeUs)
                 }
             } finally {
@@ -149,4 +169,9 @@ class VideoEncoder(
             Log.e(TAG, "Encoder error", e)
         }
     }
+
+    private fun findEncoder(mimeType: String): MediaCodecInfo =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
+            info.isEncoder && info.supportedTypes.any { it.equals(mimeType, ignoreCase = true) }
+        } ?: throw IllegalStateException("No hardware encoder supports $mimeType on this device")
 }
