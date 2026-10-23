@@ -7,10 +7,15 @@ pub mod audio;
 pub mod connection;
 pub mod control;
 pub mod protocol;
+pub mod session;
 pub mod video;
 
+#[cfg(test)]
+mod session_tests;
+
 use anyhow::{bail, Context, Result};
-use log::{info, warn};
+use log::info;
+use session::{CapabilitySet, SessionEvent, SessionMachine, SessionMessage, StreamRequest};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -98,6 +103,10 @@ impl CamdroidSession {
     /// Connect to a CamDroid phone and start the streaming pipeline.
     pub fn connect(mode: ConnectionMode, config: SessionConfig) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
+        let mut session = SessionMachine::new();
+        session
+            .apply(SessionEvent::ConnectRequested)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
 
         // Determine the connection address
         let (connect_addr, adb_guard) = match &mode {
@@ -146,28 +155,91 @@ impl CamdroidSession {
 
         let writer = Arc::new(writer);
 
-        // Send handshake
-        let handshake = protocol::ClientHandshake {
-            version: "2.0".to_string(),
+        session
+            .apply(SessionEvent::TransportConnected)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+
+        // Control negotiation is JSON metadata while Task 3 migrates media
+        // frames to the v2 binary envelope. No pipeline starts before accept.
+        let hello = SessionMessage::Hello {
+            protocol_versions: vec![2],
             client: "camdroid-desktop".to_string(),
         };
-        let handshake_json = serde_json::to_value(&handshake)?;
-        writer.send(protocol::Packet::metadata(&handshake_json)?)?;
+        writer.send(protocol::Packet::metadata(&serde_json::to_value(hello)?)?)?;
 
-        // Wait for server capabilities
+        // Wait for the phone's explicit v2 capability response.
         info!("Waiting for server capabilities...");
-        let capabilities: ServerCapabilities = match channels
+        let negotiated_capabilities: CapabilitySet = match channels
             .metadata_rx
             .recv_timeout(std::time::Duration::from_secs(10))
         {
-            Ok(meta_bytes) => serde_json::from_slice(&meta_bytes).unwrap_or_else(|e| {
-                warn!("Failed to parse server capabilities: {}", e);
-                ServerCapabilities::default()
-            }),
-            Err(_) => {
-                warn!("No server capabilities received, using defaults");
-                ServerCapabilities::default()
-            }
+            Ok(meta_bytes) => match serde_json::from_slice::<SessionMessage>(&meta_bytes)? {
+                SessionMessage::Capabilities(capabilities) => capabilities,
+                other => bail!("expected capabilities response, received {other:?}"),
+            },
+            Err(_) => bail!("timed out waiting for negotiated capabilities"),
+        };
+
+        session
+            .apply(SessionEvent::CapabilitiesReceived(
+                negotiated_capabilities.clone(),
+            ))
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+
+        let (width, height) = parse_resolution(&config.resolution);
+        let stream_request = StreamRequest {
+            config: protocol::v2::StreamConfig {
+                codec: config.codec.clone(),
+                width,
+                height,
+                fps: config.fps,
+                bitrate_bps: 8_000_000,
+                profile: None,
+                level: None,
+                audio: None,
+            },
+            audio_enabled: config.audio,
+        };
+        session
+            .apply(SessionEvent::StartRequested(stream_request.clone()))
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        writer.send(protocol::Packet::metadata(&serde_json::to_value(
+            SessionMessage::Start(stream_request),
+        )?)?)?;
+
+        let accepted_stream = match channels
+            .metadata_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+        {
+            Ok(meta_bytes) => match serde_json::from_slice::<SessionMessage>(&meta_bytes)? {
+                SessionMessage::StreamAccepted(stream) => stream,
+                SessionMessage::StreamRejected(error) => {
+                    bail!("stream rejected: {}", error.message)
+                }
+                other => bail!("expected stream acceptance, received {other:?}"),
+            },
+            Err(_) => bail!("timed out waiting for stream acknowledgement"),
+        };
+        session
+            .apply(SessionEvent::StartAcknowledged(accepted_stream))
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+
+        let capabilities = ServerCapabilities {
+            version: "2.0".to_string(),
+            device: "negotiated phone".to_string(),
+            codecs: negotiated_capabilities.codecs.clone(),
+            resolutions: negotiated_capabilities
+                .video_modes
+                .iter()
+                .map(|mode| format!("{}x{}", mode.width, mode.height))
+                .collect(),
+            fps: negotiated_capabilities
+                .video_modes
+                .iter()
+                .map(|mode| mode.fps)
+                .collect(),
+            audio: !negotiated_capabilities.audio_codecs.is_empty(),
+            battery: 0,
         };
 
         info!(
@@ -175,17 +247,6 @@ impl CamdroidSession {
             capabilities.device, capabilities.version, capabilities.codecs, capabilities.battery
         );
 
-        // Send start command
-        let start_cmd = ControlCommand::Start {
-            codec: config.codec.clone(),
-            resolution: config.resolution.clone(),
-            fps: config.fps,
-            audio: config.audio,
-        };
-        writer.send(protocol::Packet::control_cmd(&start_cmd)?)?;
-        info!("Stream start requested");
-
-        let (width, height) = parse_resolution(&config.resolution);
         let video_codec = VideoCodec::from_str(&config.codec)?;
 
         // Create channel for decoded YUYV frames → v4l2loopback

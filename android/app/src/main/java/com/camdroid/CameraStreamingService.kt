@@ -67,6 +67,7 @@ class CameraStreamingService : LifecycleService() {
     // Stats
     private val frameCount = AtomicLong(0)
     private val isStreaming = AtomicBoolean(false)
+    private val nextSessionId = AtomicLong(1)
 
     private val gson = Gson()
 
@@ -244,20 +245,34 @@ class CameraStreamingService : LifecycleService() {
     }
 
     private suspend fun onClientConnected() {
-        Log.i(TAG, "Client connected, starting encoder and camera...")
+        Log.i(TAG, "Client connected, waiting for stream negotiation...")
         StreamingController.isConnected.value = true
 
-        // Send server capabilities
+        // Report only the active service mode until Task 7 replaces these
+        // values with runtime Camera2/MediaCodec capability discovery.
+        val mode = JsonObject().apply {
+            addProperty("width", currentConfig.resolution.width)
+            addProperty("height", currentConfig.resolution.height)
+            addProperty("fps", currentConfig.fps)
+            addProperty("min_bitrate_bps", 1_000_000L)
+            addProperty("max_bitrate_bps", 50_000_000L)
+        }
+        val capabilityData = JsonObject().apply {
+            add("protocol_versions", gson.toJsonTree(listOf(2)))
+            add("codecs", gson.toJsonTree(listOf(currentConfig.codec.name.lowercase())))
+            add("video_modes", gson.toJsonTree(listOf(mode)))
+            add("audio_codecs", gson.toJsonTree(if (audioEnabled) listOf("aac") else emptyList<String>()))
+        }
         val capabilities = JsonObject().apply {
-            addProperty("version", "1.0")
-            addProperty("device", NetworkUtils.getDeviceName())
-            add("codecs", gson.toJsonTree(listOf("h264", "h265", "mjpeg")))
-            add("resolutions", gson.toJsonTree(listOf("1080p", "1440p", "4k")))
-            add("fps", gson.toJsonTree(listOf(30, 60)))
-            addProperty("audio", true)
-            addProperty("battery", batteryMonitor?.batteryLevel ?: 100)
+            addProperty("type", "capabilities")
+            add("data", capabilityData)
         }
         streamServer?.sendMetadata(gson.toJson(capabilities))
+        updateNotification("Connected • negotiating stream")
+    }
+
+    private suspend fun startAcceptedStream() {
+        if (videoEncoder != null) return
 
         // Start video encoder
         videoEncoder = VideoEncoder(currentConfig) { data, isConfig, isKeyFrame, pts ->
@@ -307,7 +322,11 @@ class CameraStreamingService : LifecycleService() {
     }
 
     private fun handleControlCommand(cmd: JsonObject) {
-        val command = cmd.get("cmd")?.asString ?: return
+        val command = cmd.get("cmd")?.asString
+        if (command == null) {
+            handleSessionMessage(cmd)
+            return
+        }
         Log.d(TAG, "Handling control: $command")
 
         when (command) {
@@ -381,6 +400,55 @@ class CameraStreamingService : LifecycleService() {
                 stopSelf()
             }
         }
+    }
+
+    private fun handleSessionMessage(message: JsonObject) {
+        when (message.get("type")?.asString) {
+            "hello" -> Unit // capabilities were sent on connection.
+            "start" -> {
+                val request = message.getAsJsonObject("data") ?: return
+                val config = request.getAsJsonObject("config") ?: return
+                val requestedCodec = config.get("codec")?.asString
+                val width = config.get("width")?.asInt
+                val height = config.get("height")?.asInt
+                val fps = config.get("fps")?.asInt
+                val bitrate = config.get("bitrate_bps")?.asInt
+                val audio = request.get("audio_enabled")?.asBoolean ?: false
+                val error = when {
+                    requestedCodec != currentConfig.codec.name.lowercase() -> "Requested codec is unavailable"
+                    width != currentConfig.resolution.width || height != currentConfig.resolution.height || fps != currentConfig.fps -> "Requested video mode is unavailable"
+                    bitrate == null || bitrate !in 1_000_000..50_000_000 -> "Requested bitrate is unavailable"
+                    audio && !audioEnabled -> "Audio is unavailable"
+                    else -> null
+                }
+                if (error != null) {
+                    sendStreamRejected(error)
+                    return
+                }
+                currentConfig = currentConfig.copy(bitrate = bitrate)
+                val accepted = JsonObject().apply {
+                    addProperty("session_id", nextSessionId.getAndIncrement())
+                    add("config", config)
+                    addProperty("audio_enabled", audio)
+                }
+                streamServer?.sendMetadata(gson.toJson(JsonObject().apply {
+                    addProperty("type", "stream_accepted")
+                    add("data", accepted)
+                }))
+                lifecycleScope.launch { startAcceptedStream() }
+            }
+        }
+    }
+
+    private fun sendStreamRejected(message: String) {
+        val error = JsonObject().apply {
+            addProperty("code", "unsupported_mode")
+            addProperty("message", message)
+        }
+        streamServer?.sendMetadata(gson.toJson(JsonObject().apply {
+            addProperty("type", "stream_rejected")
+            add("data", error)
+        }))
     }
 
     private suspend fun restartEncoder() {

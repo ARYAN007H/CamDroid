@@ -117,6 +117,11 @@ class StreamServer(
                     ProtocolHandler.METADATA -> {
                         val json = String(packet.payload, Charsets.UTF_8)
                         Log.i(TAG, "Client metadata: $json")
+                        try {
+                            onControlCommand(gson.fromJson(json, JsonObject::class.java))
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to parse client metadata: $json", e)
+                        }
                     }
                     ProtocolHandler.HEARTBEAT -> {
                         Log.d(TAG, "Heartbeat from client")
