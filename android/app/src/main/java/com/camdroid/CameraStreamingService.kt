@@ -431,7 +431,7 @@ class CameraStreamingService : LifecycleService() {
                     sendStreamRejected(error)
                     return
                 }
-                currentConfig = currentConfig.copy(bitrate = bitrate)
+                currentConfig = currentConfig.copy(bitrate = checkNotNull(bitrate))
                 activeSessionId = nextSessionId.getAndIncrement()
                 val accepted = JsonObject().apply {
                     addProperty("session_id", activeSessionId)

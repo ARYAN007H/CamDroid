@@ -11,7 +11,8 @@ class SessionStateTest {
 
     @Test fun startWaitsForAcknowledgement() {
         val state = negotiating()
-        assertTrue(state.apply(SessionEvent.StartRequested(request)).isSuccess)
+        val result = state.apply(SessionEvent.StartRequested(request))
+        assertTrue("phase=${state.phase}, capabilities=${state.capabilities}, error=${result.exceptionOrNull()}", result.isSuccess)
         assertEquals(SessionPhase.AwaitingStartAck, state.phase)
         val stream = NegotiatedStream(1, request)
         assertEquals(listOf(SessionEffect.StartMedia(stream)), state.apply(SessionEvent.StartAcknowledged(stream)).getOrThrow())

@@ -39,7 +39,8 @@ class StreamSessionState {
 
     private fun request(request: StreamRequest, reconfigure: Boolean): Result<List<SessionEffect>> {
         val validPhase = if (reconfigure) phase is SessionPhase.Streaming else phase is SessionPhase.Negotiating
-        val error = capabilities?.supports(request) ?: SessionError(SessionErrorCode.INVALID_TRANSITION, "Capabilities have not arrived")
+        val error = capabilities?.let { it.supports(request) }
+            ?: if (capabilities == null) SessionError(SessionErrorCode.INVALID_TRANSITION, "Capabilities have not arrived") else null
         if (!validPhase) return failure(invalid(request))
         if (error != null) return failure(error)
         pending = request; phase = if (reconfigure) SessionPhase.AwaitingReconfigureAck else SessionPhase.AwaitingStartAck

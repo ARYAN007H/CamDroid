@@ -81,4 +81,8 @@ dependencies {
 
     // Debug tools
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    // Local tests for protocol, session, and bounded media queue behavior
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }

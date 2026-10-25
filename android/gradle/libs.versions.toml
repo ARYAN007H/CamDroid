@@ -8,6 +8,7 @@ androidxCamera = "1.4.1"
 androidxNavigation = "2.8.5"
 androidxDatastore = "1.1.1"
 coroutines = "1.9.0"
+coroutinesTest = "1.9.0"
 junit = "4.13.2"
 kotlin = "2.0.21"
 gson = "2.11.0"
@@ -34,6 +35,8 @@ androidx-navigation-compose = { module = "androidx.navigation:navigation-compose
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "androidxDatastore" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+junit = { module = "junit:junit", version.ref = "junit" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutinesTest" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }
