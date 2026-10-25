@@ -166,10 +166,7 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
         }
 
         "flash" => {
-            let state = parts
-                .get(1)
-                .context("Usage: flash on|off")?
-                .to_lowercase();
+            let state = parts.get(1).context("Usage: flash on|off")?.to_lowercase();
             let enabled = match state.as_str() {
                 "on" | "true" | "1" => true,
                 "off" | "false" | "0" => false,
@@ -191,9 +188,7 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
                 .context("Usage: resolution <1080p|1440p|4k>")?
                 .to_string();
             match value.as_str() {
-                "1080p" | "1440p" | "4k" | "2k" => {
-                    ControlCommand::SetResolution { value }
-                }
+                "1080p" | "1440p" | "4k" | "2k" => ControlCommand::SetResolution { value },
                 _ => anyhow::bail!("Unknown resolution: {}. Use: 1080p, 1440p, 4k", value),
             }
         }
@@ -216,9 +211,7 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
                 .context("Usage: codec <h264|h265|mjpeg>")?
                 .to_lowercase();
             match value.as_str() {
-                "h264" | "h265" | "hevc" | "mjpeg" => {
-                    ControlCommand::SetCodec { value }
-                }
+                "h264" | "h265" | "hevc" | "mjpeg" => ControlCommand::SetCodec { value },
                 _ => anyhow::bail!("Unknown codec: {}. Use: h264, h265, mjpeg", value),
             }
         }

@@ -27,10 +27,7 @@ impl AdbForward {
 
 impl Drop for AdbForward {
     fn drop(&mut self) {
-        info!(
-            "Removing ADB port forwarding for device {}",
-            self.serial
-        );
+        info!("Removing ADB port forwarding for device {}", self.serial);
         let result = Command::new("adb")
             .args([
                 "-s",
@@ -89,11 +86,7 @@ pub fn list_devices() -> Result<Vec<String>> {
         .skip(1) // Skip the "List of devices attached" header
         .filter(|line| !line.trim().is_empty())
         .filter(|line| line.contains("device") && !line.contains("unauthorized"))
-        .filter_map(|line| {
-            line.split_whitespace()
-                .next()
-                .map(|s| s.to_string())
-        })
+        .filter_map(|line| line.split_whitespace().next().map(|s| s.to_string()))
         .collect();
 
     Ok(devices)

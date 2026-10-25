@@ -70,10 +70,7 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                         .unwrap_or_else(|| "Unknown".to_string());
 
                     for addr in info.get_addresses() {
-                        info!(
-                            "Found: {} at {}:{} ({})",
-                            name, addr, port, device_model
-                        );
+                        info!("Found: {} at {}:{} ({})", name, addr, port, device_model);
                         devices.push(DiscoveredDevice {
                             name: name.clone(),
                             ip: *addr,

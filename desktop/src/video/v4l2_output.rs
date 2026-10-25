@@ -3,6 +3,7 @@
 // Opens a v4l2loopback device (e.g. /dev/video10), sets the output format
 // to YUYV422, and writes decoded frames to make them appear as a real webcam.
 
+use crate::video::filters::FilterController;
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::Receiver;
 use log::{error, info, warn};
@@ -65,11 +66,7 @@ nix::ioctl_readwrite!(vidioc_s_fmt, b'V', 5, V4l2Format);
 /// Open a v4l2loopback device and configure it for YUYV output.
 ///
 /// Returns a file handle ready for writing raw YUYV422 frame data.
-fn open_v4l2_device(
-    device_path: &str,
-    width: u32,
-    height: u32,
-) -> Result<std::fs::File> {
+fn open_v4l2_device(device_path: &str, width: u32, height: u32) -> Result<std::fs::File> {
     info!(
         "Opening v4l2loopback device: {} ({}x{} YUYV)",
         device_path, width, height
@@ -139,6 +136,7 @@ fn open_v4l2_device(
 /// * `width` - Frame width in pixels
 /// * `height` - Frame height in pixels
 /// * `target_fps` - Target output frame rate for pacing
+/// * `filters` - Shared desktop filter selection applied before virtual-camera output
 /// * `shutdown` - Shutdown signal
 pub fn spawn_v4l2_writer_thread(
     device_path: String,
@@ -146,14 +144,21 @@ pub fn spawn_v4l2_writer_thread(
     width: u32,
     height: u32,
     target_fps: u32,
+    filters: FilterController,
     shutdown: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>> {
     let handle = thread::Builder::new()
         .name("v4l2-writer".into())
         .spawn(move || {
-            if let Err(e) =
-                v4l2_writer_loop(&device_path, frame_rx, width, height, target_fps, shutdown)
-            {
+            if let Err(e) = v4l2_writer_loop(
+                &device_path,
+                frame_rx,
+                width,
+                height,
+                target_fps,
+                filters,
+                shutdown,
+            ) {
                 error!("v4l2 writer error: {:#}", e);
             }
             info!("v4l2 writer thread exiting");
@@ -170,6 +175,7 @@ fn v4l2_writer_loop(
     width: u32,
     height: u32,
     target_fps: u32,
+    filters: FilterController,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut device = open_v4l2_device(device_path, width, height)?;
@@ -193,7 +199,7 @@ fn v4l2_writer_loop(
         let frame_start = Instant::now();
 
         // Receive the next decoded frame
-        let frame_data = match frame_rx.recv_timeout(Duration::from_millis(500)) {
+        let frame_data = match frame_rx.recv_timeout(Duration::from_millis(10)) {
             Ok(data) => data,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -202,35 +208,21 @@ fn v4l2_writer_loop(
             }
         };
 
-        // Validate frame size
-        if frame_data.len() != expected_frame_size {
+        let received_len = frame_data.len();
+        let (frame_data, dropped_stale) = take_newest_frame(frame_data, &frame_rx);
+        if dropped_stale > 0 {
+            debug_assert!(frame_data.len() > 0);
+        }
+        let output = prepare_frame_for_output(frame_data, expected_frame_size, &filters);
+
+        if received_len != expected_frame_size {
             warn!(
                 "Frame size mismatch: got {} bytes, expected {} ({}x{} YUYV)",
-                frame_data.len(),
-                expected_frame_size,
-                width,
-                height
+                received_len, expected_frame_size, width, height
             );
-            // Try to write anyway — v4l2loopback may accept partial frames
-            if frame_data.len() < expected_frame_size {
-                // Pad with zeros (black)
-                let mut padded = frame_data;
-                padded.resize(expected_frame_size, 0x80); // 0x80 = neutral UV
-                if let Err(e) = device.write_all(&padded) {
-                    error!("v4l2 write error (padded): {}", e);
-                    // Try reopening the device
-                    device = open_v4l2_device(device_path, width, height)?;
-                    continue;
-                }
-            } else {
-                // Truncate to expected size
-                if let Err(e) = device.write_all(&frame_data[..expected_frame_size]) {
-                    error!("v4l2 write error (truncated): {}", e);
-                    device = open_v4l2_device(device_path, width, height)?;
-                    continue;
-                }
-            }
-        } else if let Err(e) = device.write_all(&frame_data) {
+        }
+
+        if let Err(e) = device.write_all(&output) {
             error!("v4l2 write error: {}", e);
             // Attempt to recover by reopening the device
             match open_v4l2_device(device_path, width, height) {
@@ -269,15 +261,42 @@ fn v4l2_writer_loop(
     Ok(())
 }
 
+/// Drains queued decoded frames before any effect work, keeping the output as
+/// close to capture time as possible when V4L2 briefly stalls.
+fn take_newest_frame(mut newest: Vec<u8>, frame_rx: &Receiver<Vec<u8>>) -> (Vec<u8>, u64) {
+    let mut dropped = 0;
+    while let Ok(next) = frame_rx.try_recv() {
+        newest = next;
+        dropped += 1;
+    }
+    (newest, dropped)
+}
+
+fn prepare_frame_for_output(
+    mut frame: Vec<u8>,
+    expected_frame_size: usize,
+    filters: &FilterController,
+) -> Vec<u8> {
+    if frame.len() < expected_frame_size {
+        frame.resize(expected_frame_size, 0x80);
+    } else if frame.len() > expected_frame_size {
+        frame.truncate(expected_frame_size);
+    }
+    filters.settings().apply_yuyv_frame(&mut frame);
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::filters::{FilterController, FilterPreset, FilterSettings};
+    use crossbeam_channel::bounded;
 
     #[test]
     fn test_v4l2_format_layout() {
         assert_eq!(std::mem::size_of::<V4l2PixFormat>(), 48);
         assert_eq!(std::mem::size_of::<V4l2Format>(), 208);
-        
+
         // Let's verify the offsets in Rust
         let dummy = V4l2Format {
             type_: 0,
@@ -298,15 +317,48 @@ mod tests {
             },
             _padding: [0u8; 152],
         };
-        
+
         let base_ptr = &dummy as *const V4l2Format as usize;
         let fmt_ptr = &dummy.fmt as *const V4l2PixFormat as usize;
         let width_ptr = &dummy.fmt.width as *const u32 as usize;
         let pixelformat_ptr = &dummy.fmt.pixelformat as *const u32 as usize;
-        
+
         assert_eq!(fmt_ptr - base_ptr, 8);
         assert_eq!(width_ptr - base_ptr, 8);
         assert_eq!(pixelformat_ptr - base_ptr, 16);
     }
-}
 
+    #[test]
+    fn output_transform_applies_the_selected_preset() {
+        let controller = FilterController::new(FilterSettings::for_preset(FilterPreset::WarmFilm));
+        let frame = vec![100_u8, 128, 150, 128];
+
+        assert_ne!(
+            prepare_frame_for_output(frame, 4, &controller),
+            vec![100, 128, 150, 128]
+        );
+    }
+
+    #[test]
+    fn output_transform_leaves_natural_fixture_unchanged() {
+        let controller = FilterController::default();
+        let frame = vec![100_u8, 128, 150, 128];
+
+        assert_eq!(
+            prepare_frame_for_output(frame.clone(), 4, &controller),
+            frame
+        );
+    }
+
+    #[test]
+    fn newest_frame_is_selected_before_filter_work() {
+        let (tx, rx) = bounded(3);
+        tx.send(vec![1]).unwrap();
+        tx.send(vec![2]).unwrap();
+        tx.send(vec![3]).unwrap();
+
+        let (newest, dropped) = take_newest_frame(vec![0], &rx);
+        assert_eq!(newest, vec![3]);
+        assert_eq!(dropped, 3);
+    }
+}

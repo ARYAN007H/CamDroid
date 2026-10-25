@@ -28,6 +28,9 @@ extern crate ffmpeg_next as ffmpeg;
 // Re-export key types for consumers
 pub use connection::{DiscoveredDevice, PacketChannels, WriterHandle};
 pub use protocol::{ControlCommand, ServerCapabilities};
+pub use video::filters::{
+    FilterController, FilterPreset, FilterSettings, RendererProbe, RendererStatus,
+};
 pub use video::VideoCodec;
 
 /// Configuration for a CamDroid streaming session.
@@ -88,6 +91,7 @@ pub struct CamdroidSession {
     shutdown: Arc<AtomicBool>,
     capabilities: ServerCapabilities,
     config: SessionConfig,
+    filters: FilterController,
     _adb_guard: Option<connection::AdbForward>,
     _pulse_output: Option<audio::PulseOutput>,
 }
@@ -255,6 +259,7 @@ impl CamdroidSession {
 
         // Create channel for decoded YUYV frames → v4l2loopback
         let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Vec<u8>>(8);
+        let filters = FilterController::default();
 
         // Spawn video decoder thread
         let _video_decoder_handle = video::decoder::spawn_decoder_thread(
@@ -274,6 +279,7 @@ impl CamdroidSession {
             width,
             height,
             config.fps,
+            filters.clone(),
             shutdown.clone(),
         )?;
 
@@ -317,6 +323,7 @@ impl CamdroidSession {
             shutdown,
             capabilities,
             config,
+            filters,
             _adb_guard: adb_guard,
             _pulse_output: pulse_output,
         })
@@ -335,6 +342,11 @@ impl CamdroidSession {
     /// Get the current session config.
     pub fn config(&self) -> &SessionConfig {
         &self.config
+    }
+
+    /// The live filter selection applied to both standalone and virtual-camera output.
+    pub fn filters(&self) -> FilterController {
+        self.filters.clone()
     }
 
     /// Get the current session status.

@@ -58,10 +58,7 @@ impl PulseOutput {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "Failed to create PulseAudio null sink: {}",
-                stderr.trim()
-            );
+            bail!("Failed to create PulseAudio null sink: {}", stderr.trim());
         }
 
         let module_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -69,10 +66,7 @@ impl PulseOutput {
             "PulseAudio null sink created: {} (module ID: {})",
             sink_name, module_id
         );
-        info!(
-            "Virtual microphone available as: {}.monitor",
-            sink_name
-        );
+        info!("Virtual microphone available as: {}.monitor", sink_name);
         info!(
             "Select '{}_Microphone' as your microphone in OBS/Zoom/Discord",
             sink_name
@@ -87,15 +81,16 @@ impl PulseOutput {
     /// Try to remove an existing sink with the same name (from a previous run).
     fn try_cleanup_existing(sink_name: &str) {
         // List loaded modules and find any with our sink name
-        if let Ok(output) = Command::new("pactl").args(["list", "short", "modules"]).output() {
+        if let Ok(output) = Command::new("pactl")
+            .args(["list", "short", "modules"])
+            .output()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 if line.contains(sink_name) && line.contains("module-null-sink") {
                     if let Some(id) = line.split_whitespace().next() {
                         debug!("Removing stale PulseAudio module: {}", id);
-                        let _ = Command::new("pactl")
-                            .args(["unload-module", id])
-                            .output();
+                        let _ = Command::new("pactl").args(["unload-module", id]).output();
                     }
                 }
             }
@@ -111,10 +106,7 @@ impl PulseOutput {
 impl Drop for PulseOutput {
     fn drop(&mut self) {
         if let Some(ref module_id) = self.module_id {
-            info!(
-                "Removing PulseAudio null sink (module {})",
-                module_id
-            );
+            info!("Removing PulseAudio null sink (module {})", module_id);
             match Command::new("pactl")
                 .args(["unload-module", module_id])
                 .output()
@@ -130,10 +122,7 @@ impl Drop for PulseOutput {
                     );
                 }
                 Err(e) => {
-                    error!(
-                        "Failed to run pactl to remove module {}: {}",
-                        module_id, e
-                    );
+                    error!("Failed to run pactl to remove module {}: {}", module_id, e);
                 }
             }
         }
@@ -181,11 +170,11 @@ fn pulse_writer_loop(
     assert!(spec.is_valid(), "Invalid PulseAudio sample spec");
 
     let pulse = Simple::new(
-        None,              // Default server
-        "CamDroid",        // Application name
+        None,                // Default server
+        "CamDroid",          // Application name
         Direction::Playback, // We're writing audio
-        Some(sink_name),   // Target the null sink we created
-        "CamDroid Audio",  // Stream description
+        Some(sink_name),     // Target the null sink we created
+        "CamDroid Audio",    // Stream description
         &spec,
         None, // Default channel map
         None, // Default buffer attributes
@@ -241,9 +230,6 @@ fn pulse_writer_loop(
         debug!("PulseAudio drain error: {}", e);
     }
 
-    info!(
-        "PulseAudio writer: {} total bytes written",
-        bytes_written
-    );
+    info!("PulseAudio writer: {} total bytes written", bytes_written);
     Ok(())
 }

@@ -1,5 +1,5 @@
 # CamDroid Phase 0 Audit
-
+[the laptop user is using has i31115g4 and 8gb ddr4 ram and no dedicated gpu]
 **Date:** 2026-10-16  
 **Scope:** static review of all Android, desktop Rust, Tauri, and protocol source. No code, build configuration, or runtime behaviour was changed as part of this audit. The conclusions below describe what the current source implements; they are not device measurements.
 
