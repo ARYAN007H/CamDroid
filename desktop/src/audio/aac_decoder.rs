@@ -4,6 +4,7 @@
 // decodes them to raw PCM S16LE samples, and sends them to the
 // PulseAudio output for playback as a virtual microphone.
 
+use crate::media_queue::{BoundedAudioQueue, TimedMediaFrame};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, info, warn};
@@ -15,8 +16,8 @@ extern crate ffmpeg_next as ffmpeg;
 
 use ffmpeg::codec;
 use ffmpeg::software::resampling;
-use ffmpeg::util::format::sample::Sample;
 use ffmpeg::util::channel_layout::ChannelLayout;
+use ffmpeg::util::format::sample::Sample;
 
 /// Spawn a thread that decodes AAC audio and outputs PCM S16LE samples.
 ///
@@ -27,7 +28,7 @@ use ffmpeg::util::channel_layout::ChannelLayout;
 /// * `shutdown` - Shutdown signal
 pub fn spawn_audio_decoder_thread(
     audio_config_rx: Receiver<Vec<u8>>,
-    audio_rx: Receiver<Vec<u8>>,
+    audio_rx: Receiver<TimedMediaFrame>,
     pcm_tx: Sender<Vec<u8>>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>> {
@@ -47,29 +48,27 @@ pub fn spawn_audio_decoder_thread(
 /// Main audio decoder loop.
 fn audio_decoder_loop(
     audio_config_rx: Receiver<Vec<u8>>,
-    audio_rx: Receiver<Vec<u8>>,
+    audio_rx: Receiver<TimedMediaFrame>,
     pcm_tx: Sender<Vec<u8>>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     info!("Audio decoder starting");
 
     // Find the AAC decoder
-    let codec = codec::decoder::find(codec::Id::AAC)
-        .context("FFmpeg AAC decoder not found")?;
+    let codec = codec::decoder::find(codec::Id::AAC).context("FFmpeg AAC decoder not found")?;
 
     let mut context = codec::Context::new_with_codec(codec);
+    let media_time_base = ffmpeg::Rational(1, 1_000_000_000);
+    context.set_time_base(media_time_base);
 
     // Optionally set extradata from AudioSpecificConfig if received
     match audio_config_rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(config_data) => {
-            info!(
-                "Received audio config data: {} bytes",
-                config_data.len()
-            );
+            info!("Received audio config data: {} bytes", config_data.len());
             unsafe {
-                let extradata_ptr =
-                    ffmpeg::ffi::av_mallocz(config_data.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize)
-                        as *mut u8;
+                let extradata_ptr = ffmpeg::ffi::av_mallocz(
+                    config_data.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize,
+                ) as *mut u8;
                 if !extradata_ptr.is_null() {
                     std::ptr::copy_nonoverlapping(
                         config_data.as_ptr(),
@@ -86,9 +85,13 @@ fn audio_decoder_loop(
         }
     }
 
-    let mut decoder = context.decoder().audio().context("Failed to open AAC decoder")?;
+    let mut decoder = context
+        .decoder()
+        .audio()
+        .context("Failed to open AAC decoder")?;
     let mut resampler: Option<resampling::Context> = None;
     let mut frames_decoded: u64 = 0;
+    let mut pending_audio = BoundedAudioQueue::new(1_000_000_000);
 
     // Target output format: S16LE, 44100Hz, Mono (matching phone's capture)
     let target_format = Sample::I16(ffmpeg::util::format::sample::Type::Packed);
@@ -102,18 +105,37 @@ fn audio_decoder_loop(
             break;
         }
 
-        // Receive AAC frame data
-        let aac_data = match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(data) => data,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                info!("Audio input channel disconnected");
-                break;
+        // Fill a timestamp-bounded queue, retaining FIFO order but discarding
+        // audio that would otherwise leave playback over a second behind.
+        if pending_audio.len() == 0 {
+            match audio_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(frame) => pending_audio.push(frame),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    info!("Audio input channel disconnected");
+                    break;
+                }
             }
+        }
+        while let Ok(frame) = audio_rx.try_recv() {
+            pending_audio.push(frame);
+        }
+        let Some(frame) = pending_audio.pop_front() else {
+            continue;
         };
+        if frame.packet.kind != crate::protocol::v2::MediaKind::Audio {
+            continue;
+        }
 
         // Create an FFmpeg packet from the raw AAC data (with ADTS header)
-        let packet = ffmpeg::Packet::copy(&aac_data);
+        let mut packet = ffmpeg::Packet::copy(&frame.packet.payload);
+        if frame.packet.session_id.0 != 0 {
+            let pts = i64::try_from(frame.packet.capture_timestamp.0)
+                .context("audio capture timestamp exceeds FFmpeg PTS range")?;
+            packet.set_pts(Some(pts));
+            packet.set_dts(Some(pts));
+            packet.set_time_base(media_time_base);
+        }
 
         // Send to decoder
         if let Err(e) = decoder.send_packet(&packet) {
@@ -139,8 +161,7 @@ fn audio_decoder_loop(
                 if resampler.is_none() {
                     info!(
                         "Audio: resampling {:?}/{}Hz/{:?} → {:?}/{}Hz/{:?}",
-                        src_format, src_rate, src_layout,
-                        target_format, target_rate, target_layout
+                        src_format, src_rate, src_layout, target_format, target_rate, target_layout
                     );
                     let r = resampling::Context::get(
                         src_format,

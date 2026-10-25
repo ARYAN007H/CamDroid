@@ -3,6 +3,7 @@
 // Receives encoded NAL units (or JPEG frames), decodes them to raw video,
 // and converts the output to YUYV422 format for v4l2loopback.
 
+use crate::media_queue::{LatestVideoQueue, TimedMediaFrame};
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, info, warn};
@@ -58,7 +59,7 @@ pub struct DecoderStats {
 /// # Arguments
 /// * `video_codec` - The codec to decode
 /// * `video_config_rx` - Channel receiving codec config data (SPS/PPS/VPS)
-/// * `video_rx` - Channel receiving encoded video frames
+/// * `video_rx` - Channel receiving timestamped encoded video frames
 /// * `frame_tx` - Channel to send decoded YUYV422 frames
 /// * `width` - Expected output width
 /// * `height` - Expected output height
@@ -66,7 +67,7 @@ pub struct DecoderStats {
 pub fn spawn_decoder_thread(
     video_codec: VideoCodec,
     video_config_rx: Receiver<Vec<u8>>,
-    video_rx: Receiver<Vec<u8>>,
+    video_rx: Receiver<TimedMediaFrame>,
     frame_tx: Sender<Vec<u8>>,
     width: u32,
     height: u32,
@@ -97,7 +98,7 @@ pub fn spawn_decoder_thread(
 fn decoder_loop(
     video_codec: VideoCodec,
     video_config_rx: Receiver<Vec<u8>>,
-    video_rx: Receiver<Vec<u8>>,
+    video_rx: Receiver<TimedMediaFrame>,
     frame_tx: Sender<Vec<u8>>,
     width: u32,
     height: u32,
@@ -113,6 +114,8 @@ fn decoder_loop(
         .with_context(|| format!("FFmpeg decoder not found for {:?}", video_codec))?;
 
     let mut context = codec::Context::new_with_codec(codec);
+    let media_time_base = ffmpeg::Rational(1, 1_000_000_000);
+    context.set_time_base(media_time_base);
 
     // For MJPEG, we can start decoding immediately since each frame is independent.
     // For H.264/H.265, we need the codec configuration (SPS/PPS) first.
@@ -122,16 +125,13 @@ fn decoder_loop(
         // Wait for the config data with a timeout
         match video_config_rx.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(config_data) => {
-                info!(
-                    "Received video config data: {} bytes",
-                    config_data.len()
-                );
+                info!("Received video config data: {} bytes", config_data.len());
                 // Set the extradata on the codec context — this contains
                 // SPS/PPS for H.264 or VPS/SPS/PPS for H.265.
                 unsafe {
-                    let extradata_ptr =
-                        ffmpeg::ffi::av_mallocz(config_data.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize)
-                            as *mut u8;
+                    let extradata_ptr = ffmpeg::ffi::av_mallocz(
+                        config_data.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize,
+                    ) as *mut u8;
                     if !extradata_ptr.is_null() {
                         std::ptr::copy_nonoverlapping(
                             config_data.as_ptr(),
@@ -149,7 +149,10 @@ fn decoder_loop(
         }
     }
 
-    let mut decoder = context.decoder().video().context("Failed to open video decoder")?;
+    let mut decoder = context
+        .decoder()
+        .video()
+        .context("Failed to open video decoder")?;
 
     let mut stats = DecoderStats::default();
     let mut scaler: Option<scaling::Context> = None;
@@ -158,6 +161,7 @@ fn decoder_loop(
     let target_format = ffmpeg::format::Pixel::YUYV422;
     let target_width = width;
     let target_height = height;
+    let mut latest_video = LatestVideoQueue::new(3);
 
     info!("Video decoder ready, processing frames...");
 
@@ -178,18 +182,35 @@ fn decoder_loop(
             }
         }
 
-        // Receive encoded frame data with a short timeout so we can check shutdown
-        let encoded_data = match video_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(data) => data,
+        // Wake promptly, then drain any backlog and decode only its newest frame.
+        let frame = match video_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+            Ok(frame) => frame,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 info!("Video input channel disconnected");
                 break;
             }
         };
+        latest_video.push(frame);
+        while let Ok(frame) = video_rx.try_recv() {
+            latest_video.push(frame);
+        }
+        let Some(frame) = latest_video.pop_newest() else {
+            continue;
+        };
+        if frame.packet.kind != crate::protocol::v2::MediaKind::Video {
+            continue;
+        }
 
         // Create an FFmpeg packet from the raw encoded data
-        let packet = ffmpeg::Packet::copy(&encoded_data);
+        let mut packet = ffmpeg::Packet::copy(&frame.packet.payload);
+        if frame.packet.session_id.0 != 0 {
+            let pts = i64::try_from(frame.packet.capture_timestamp.0)
+                .context("capture timestamp exceeds FFmpeg PTS range")?;
+            packet.set_pts(Some(pts));
+            packet.set_dts(Some(pts));
+            packet.set_time_base(media_time_base);
+        }
 
         // Send the packet to the decoder
         if let Err(e) = decoder.send_packet(&packet) {
@@ -211,8 +232,7 @@ fn decoder_loop(
             if scaler.is_none() {
                 info!(
                     "First decoded frame: {}x{} {:?} → {}x{} {:?}",
-                    src_width, src_height, src_format,
-                    target_width, target_height, target_format
+                    src_width, src_height, src_format, target_width, target_height, target_format
                 );
             }
 

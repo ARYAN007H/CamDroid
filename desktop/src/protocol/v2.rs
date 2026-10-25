@@ -236,6 +236,30 @@ impl MediaPacket {
         ))
     }
 
+    /// Reads the remainder of an envelope after a transport has already
+    /// consumed the four-byte `CMD2` magic while selecting a wire format.
+    pub fn read_after_magic(reader: &mut impl Read) -> Result<Self> {
+        let mut header = [0_u8; V2_HEADER_LEN];
+        header[..4].copy_from_slice(&V2_MAGIC);
+        reader
+            .read_exact(&mut header[4..])
+            .context("failed to read v2 packet header")?;
+        let (kind, flags, session_id, sequence, capture_timestamp, payload_length) =
+            parse_header(&header)?;
+        let mut payload = vec![0; payload_length];
+        reader
+            .read_exact(&mut payload)
+            .context("failed to read v2 packet payload")?;
+        Ok(Self::new(
+            kind,
+            flags,
+            session_id,
+            sequence,
+            capture_timestamp,
+            payload,
+        ))
+    }
+
     pub fn write_to(&self, writer: &mut impl Write) -> Result<()> {
         let bytes = self.encode()?;
         writer

@@ -6,12 +6,16 @@
 pub mod audio;
 pub mod connection;
 pub mod control;
+pub mod media_queue;
 pub mod protocol;
 pub mod session;
 pub mod video;
 
 #[cfg(test)]
 mod session_tests;
+
+#[cfg(test)]
+mod media_queue_tests;
 
 use anyhow::{bail, Context, Result};
 use log::info;

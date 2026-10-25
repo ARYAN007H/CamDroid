@@ -93,6 +93,12 @@ pub fn read_packet(reader: &mut impl Read) -> Result<Packet> {
     let type_byte = reader
         .read_u8()
         .context("Failed to read packet type (connection closed?)")?;
+    read_packet_after_type(reader, type_byte)
+}
+
+/// Decode a legacy packet after a transport has already consumed its type
+/// byte while discriminating it from a v2 envelope.
+pub fn read_packet_after_type(reader: &mut impl Read, type_byte: u8) -> Result<Packet> {
     let packet_type = PacketType::from_byte(type_byte)?;
 
     // Read the 4-byte payload length (little-endian)

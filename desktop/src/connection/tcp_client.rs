@@ -4,11 +4,17 @@
 // Provides a reader thread that dispatches incoming packets to typed channels,
 // and a writer handle for sending outbound control commands.
 
-use crate::protocol::{self, Packet, PacketType};
+use crate::media_queue::TimedMediaFrame;
+use crate::protocol::{
+    self,
+    v2::{MediaFlags, MediaKind, MediaPacket, MediaTimestamp, SessionId},
+    Packet, PacketType,
+};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, info, warn};
 use std::io::BufWriter;
+use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -17,8 +23,8 @@ use std::time::Duration;
 
 /// Channels that carry decoded packet payloads from the reader thread.
 pub struct PacketChannels {
-    pub video_rx: Receiver<Vec<u8>>,
-    pub audio_rx: Receiver<Vec<u8>>,
+    pub video_rx: Receiver<TimedMediaFrame>,
+    pub audio_rx: Receiver<TimedMediaFrame>,
     pub video_config_rx: Receiver<Vec<u8>>,
     pub audio_config_rx: Receiver<Vec<u8>>,
     pub metadata_rx: Receiver<Vec<u8>>,
@@ -66,10 +72,13 @@ pub fn connect(
 
     info!("Connected to {}", addr_debug);
 
-    // Create dispatch channels with bounded capacity to apply backpressure.
-    // Video frames get more buffer since they arrive at 30-60 fps.
-    let (video_tx, video_rx) = crossbeam_channel::bounded::<Vec<u8>>(120);
-    let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<u8>>(240);
+    // Keep only a tiny video backlog: stale video is worse than a dropped frame.
+    let (video_tx, video_rx) = crossbeam_channel::bounded::<TimedMediaFrame>(3);
+    let video_evict_rx = video_rx.clone();
+    // 48 AAC frames is an approximately 1.1-second emergency cap; the decoder
+    // additionally trims by sender timestamps before decoding queued audio.
+    let (audio_tx, audio_rx) = crossbeam_channel::bounded::<TimedMediaFrame>(48);
+    let audio_evict_rx = audio_rx.clone();
     let (video_config_tx, video_config_rx) = crossbeam_channel::bounded::<Vec<u8>>(4);
     let (audio_config_tx, audio_config_rx) = crossbeam_channel::bounded::<Vec<u8>>(4);
     let (metadata_tx, metadata_rx) = crossbeam_channel::bounded::<Vec<u8>>(16);
@@ -85,17 +94,71 @@ pub fn connect(
         .name("tcp-reader".into())
         .spawn(move || {
             let mut reader = std::io::BufReader::new(reader_stream);
+            let mut legacy_video_sequence = 0_u64;
+            let mut legacy_audio_sequence = 0_u64;
             loop {
                 if reader_shutdown.load(Ordering::Relaxed) {
                     debug!("Reader thread: shutdown signal received");
                     break;
                 }
 
-                match protocol::read_packet(&mut reader) {
-                    Ok(packet) => {
+                let mut first_byte = [0_u8; 1];
+                let received = match reader.read_exact(&mut first_byte) {
+                    Ok(()) if first_byte[0] == b'C' => {
+                        let mut rest_magic = [0_u8; 3];
+                        reader.read_exact(&mut rest_magic).and_then(|_| {
+                            if rest_magic == *b"MD2" {
+                                protocol::v2::MediaPacket::read_after_magic(&mut reader)
+                                    .map(ReceivedPacket::V2)
+                                    .map_err(std::io::Error::other)
+                            } else {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "invalid protocol magic",
+                                ))
+                            }
+                        })
+                    }
+                    Ok(()) => protocol::wire::read_packet_after_type(&mut reader, first_byte[0])
+                        .map(ReceivedPacket::V1)
+                        .map_err(std::io::Error::other),
+                    Err(error) => Err(error),
+                };
+                match received {
+                    Ok(ReceivedPacket::V1(packet)) => {
                         let result = match packet.packet_type {
-                            PacketType::VideoFrame => video_tx.try_send(packet.payload),
-                            PacketType::AudioFrame => audio_tx.try_send(packet.payload),
+                            PacketType::VideoFrame => {
+                                legacy_video_sequence = legacy_video_sequence.wrapping_add(1);
+                                send_latest(
+                                    &video_tx,
+                                    &video_evict_rx,
+                                    TimedMediaFrame::from_packet(MediaPacket::new(
+                                        MediaKind::Video,
+                                        MediaFlags::NONE,
+                                        SessionId(0),
+                                        legacy_video_sequence,
+                                        MediaTimestamp(0),
+                                        packet.payload,
+                                    )),
+                                );
+                                continue;
+                            }
+                            PacketType::AudioFrame => {
+                                legacy_audio_sequence = legacy_audio_sequence.wrapping_add(1);
+                                send_latest(
+                                    &audio_tx,
+                                    &audio_evict_rx,
+                                    TimedMediaFrame::from_packet(MediaPacket::new(
+                                        MediaKind::Audio,
+                                        MediaFlags::NONE,
+                                        SessionId(0),
+                                        legacy_audio_sequence,
+                                        MediaTimestamp(0),
+                                        packet.payload,
+                                    )),
+                                );
+                                continue;
+                            }
                             PacketType::VideoConfig => video_config_tx.try_send(packet.payload),
                             PacketType::AudioConfig => audio_config_tx.try_send(packet.payload),
                             PacketType::Metadata => metadata_tx.try_send(packet.payload),
@@ -113,12 +176,31 @@ pub fn connect(
                         if let Err(crossbeam_channel::TrySendError::Full(_)) = result {
                             // Drop the frame rather than blocking — this is expected
                             // under load and the consumer will catch up.
-                            debug!(
-                                "Channel full for {:?}, dropping packet",
-                                packet.packet_type
-                            );
+                            debug!("Channel full for {:?}, dropping packet", packet.packet_type);
                         }
                     }
+                    Ok(ReceivedPacket::V2(packet)) => match packet.kind {
+                        MediaKind::Video => send_latest(
+                            &video_tx,
+                            &video_evict_rx,
+                            TimedMediaFrame::from_packet(packet),
+                        ),
+                        MediaKind::Audio => send_latest(
+                            &audio_tx,
+                            &audio_evict_rx,
+                            TimedMediaFrame::from_packet(packet),
+                        ),
+                        MediaKind::VideoConfig => {
+                            let _ = video_config_tx.try_send(packet.payload.clone());
+                        }
+                        MediaKind::AudioConfig => {
+                            let _ = audio_config_tx.try_send(packet.payload.clone());
+                        }
+                        MediaKind::Metadata => {
+                            let _ = metadata_tx.try_send(packet.payload.clone());
+                        }
+                        MediaKind::Control | MediaKind::Heartbeat => {}
+                    },
                     Err(e) => {
                         if reader_shutdown.load(Ordering::Relaxed) {
                             break;
@@ -160,9 +242,7 @@ pub fn connect(
                             break;
                         }
                         // Send a heartbeat to keep the connection alive
-                        if let Err(e) =
-                            protocol::write_packet(&mut writer, &Packet::heartbeat())
-                        {
+                        if let Err(e) = protocol::write_packet(&mut writer, &Packet::heartbeat()) {
                             if writer_shutdown.load(Ordering::Relaxed) {
                                 break;
                             }
@@ -193,4 +273,44 @@ pub fn connect(
     };
 
     Ok((channels, writer_handle))
+}
+
+enum ReceivedPacket {
+    V1(Packet),
+    V2(MediaPacket),
+}
+
+/// Enqueue a video payload without allowing stale frames to build up. The
+/// cloned receiver is only used by the reader thread to evict one oldest item
+/// when the consumer falls behind.
+fn send_latest<T>(sender: &Sender<T>, eviction_rx: &Receiver<T>, item: T) {
+    match sender.try_send(item) {
+        Ok(()) => {}
+        Err(crossbeam_channel::TrySendError::Full(item)) => {
+            let _ = eviction_rx.try_recv();
+            if sender.try_send(item).is_err() {
+                debug!("video channel remained full after stale-frame eviction");
+            }
+        }
+        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            debug!("video consumer disconnected");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_latest;
+    use crossbeam_channel::bounded;
+
+    #[test]
+    fn full_video_channel_discards_oldest_and_retains_newest() {
+        let (tx, rx) = bounded(3);
+        let eviction_rx = rx.clone();
+        for value in 1..=4 {
+            send_latest(&tx, &eviction_rx, value);
+        }
+
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![2, 3, 4]);
+    }
 }
