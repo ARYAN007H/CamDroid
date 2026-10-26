@@ -1,4 +1,4 @@
-//! Bounded, timestamp-aware receiver queues.
+//! Bounded, timestamp-aware receiver queues and the video admission gate.
 
 use crate::protocol::v2::{MediaFlags, MediaKind, MediaPacket, SessionId};
 use std::collections::VecDeque;
@@ -16,81 +16,112 @@ impl TimedMediaFrame {
     pub fn is_discontinuity(&self) -> bool {
         self.packet.flags.contains(MediaFlags::DISCONTINUITY)
     }
+
+    pub fn is_key_frame(&self) -> bool {
+        self.packet.flags.contains(MediaFlags::KEY_FRAME)
+    }
+}
+
+/// Whether an encoded video unit may be handed to the decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateDecision {
+    Admit,
+    Drop,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct VideoQueueStats {
-    pub dropped_stale_frames: u64,
+pub struct VideoGateStats {
+    /// Units discarded while waiting for the next key frame.
+    pub dropped_frames: u64,
+    /// Missing video sequence numbers observed within a session.
     pub sequence_gaps: u64,
+    /// Number of times the gate stopped admitting inter-coded frames.
+    pub resyncs: u64,
 }
 
-/// Keeps a small decode backlog and hands consumers the freshest frame.
-pub struct LatestVideoQueue {
-    capacity: usize,
-    frames: VecDeque<TimedMediaFrame>,
-    stats: VideoQueueStats,
+/// Protects the decoder's reference chain.
+///
+/// Inter-coded video (H.264/H.265 P- and B-frames) can only be decoded
+/// against the frames before it. Discarding an arbitrary frame to reduce
+/// latency therefore corrupts the picture until the next key frame. The gate
+/// makes the only safe choice: once continuity is lost for any reason it
+/// drops everything until a key frame arrives, then resumes cleanly.
+///
+/// Legacy v1 packets (session id 0) carry no flags and bypass the gate.
+#[derive(Debug)]
+pub struct VideoGate {
+    awaiting_key_frame: bool,
     last_sequence: Option<u64>,
     session_id: Option<SessionId>,
+    stats: VideoGateStats,
 }
 
-impl LatestVideoQueue {
-    pub fn new(capacity: usize) -> Self {
-        assert!(capacity > 0);
+impl Default for VideoGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VideoGate {
+    /// A new stream always begins on a key frame, so the gate starts closed.
+    pub fn new() -> Self {
         Self {
-            capacity,
-            frames: VecDeque::with_capacity(capacity),
-            stats: VideoQueueStats::default(),
+            awaiting_key_frame: true,
             last_sequence: None,
             session_id: None,
+            stats: VideoGateStats::default(),
         }
     }
 
-    pub fn push(&mut self, frame: TimedMediaFrame) {
-        if frame.is_discontinuity()
-            || frame.packet.kind == MediaKind::VideoConfig
-            || self
-                .session_id
-                .is_some_and(|session_id| session_id != frame.packet.session_id)
-        {
-            self.reset();
+    pub fn observe(&mut self, frame: &TimedMediaFrame) -> GateDecision {
+        let packet = &frame.packet;
+        if packet.session_id == SessionId(0) {
+            return GateDecision::Admit;
+        }
+
+        if self.session_id != Some(packet.session_id) {
+            self.session_id = Some(packet.session_id);
+            self.last_sequence = None;
+            self.request_resync();
+        }
+        if frame.is_discontinuity() {
+            self.request_resync();
         }
         if let Some(previous) = self.last_sequence {
-            if frame.packet.sequence > previous + 1 {
-                self.stats.sequence_gaps += frame.packet.sequence - previous - 1;
+            if packet.sequence > previous + 1 {
+                self.stats.sequence_gaps += packet.sequence - previous - 1;
+                self.request_resync();
             }
         }
-        self.last_sequence = Some(frame.packet.sequence);
-        self.session_id = Some(frame.packet.session_id);
-        if self.frames.len() == self.capacity {
-            self.frames.pop_front();
-            self.stats.dropped_stale_frames += 1;
+        self.last_sequence = Some(packet.sequence);
+
+        if !self.awaiting_key_frame {
+            return GateDecision::Admit;
         }
-        self.frames.push_back(frame);
+        if frame.is_key_frame() {
+            self.awaiting_key_frame = false;
+            GateDecision::Admit
+        } else {
+            self.stats.dropped_frames += 1;
+            GateDecision::Drop
+        }
     }
 
-    pub fn pop_newest(&mut self) -> Option<TimedMediaFrame> {
-        let newest = self.frames.pop_back()?;
-        self.stats.dropped_stale_frames += self.frames.len() as u64;
-        self.frames.clear();
-        Some(newest)
+    /// Stops admitting frames until the next key frame. Idempotent: only the
+    /// transition from open to closed is counted as a resync.
+    pub fn request_resync(&mut self) {
+        if !self.awaiting_key_frame {
+            self.awaiting_key_frame = true;
+            self.stats.resyncs += 1;
+        }
     }
 
-    pub fn frame_age_ns(&self, now_ns: u64) -> Option<u64> {
-        self.frames
-            .back()
-            .map(|frame| now_ns.saturating_sub(frame.packet.capture_timestamp.0))
+    pub fn is_awaiting_key_frame(&self) -> bool {
+        self.awaiting_key_frame
     }
 
-    pub fn len(&self) -> usize {
-        self.frames.len()
-    }
-    pub fn stats(&self) -> VideoQueueStats {
+    pub fn stats(&self) -> VideoGateStats {
         self.stats
-    }
-    pub fn reset(&mut self) {
-        self.frames.clear();
-        self.last_sequence = None;
-        self.session_id = None;
     }
 }
 
@@ -137,6 +168,11 @@ impl BoundedAudioQueue {
     pub fn pop_front(&mut self) -> Option<TimedMediaFrame> {
         self.frames.pop_front()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn len(&self) -> usize {
         self.frames.len()
     }

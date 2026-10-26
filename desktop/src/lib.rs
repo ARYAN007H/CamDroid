@@ -1,7 +1,8 @@
-// CamDroid Core Library
-//
-// Exposes the streaming pipeline as a reusable library for both
-// the CLI binary and the Tauri desktop GUI.
+//! CamDroid core library.
+//!
+//! Receives the phone's camera stream, decodes it, applies the chosen look,
+//! and delivers it to an in-app preview and, optionally, a virtual webcam.
+//! Used by both the command-line client and the Tauri desktop app.
 
 pub mod audio;
 pub mod connection;
@@ -9,29 +10,46 @@ pub mod control;
 pub mod media_queue;
 pub mod protocol;
 pub mod session;
+pub mod telemetry;
 pub mod video;
 
 #[cfg(test)]
+mod media_queue_tests;
+#[cfg(test)]
 mod session_tests;
 
-#[cfg(test)]
-mod media_queue_tests;
-
 use anyhow::{bail, Context, Result};
-use log::info;
-use session::{CapabilitySet, SessionEvent, SessionMachine, SessionMessage, StreamRequest};
+use log::{info, warn};
+use serde::Serialize;
+use session::{
+    recommended_bitrate, CapabilitySet, NegotiatedStream, SessionEvent, SessionMachine,
+    SessionMessage, StreamRequest,
+};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 extern crate ffmpeg_next as ffmpeg;
 
-// Re-export key types for consumers
+// Re-export key types for consumers.
 pub use connection::{DiscoveredDevice, PacketChannels, WriterHandle};
 pub use protocol::{ControlCommand, ServerCapabilities};
+pub use telemetry::{Telemetry, TelemetrySnapshot, VirtualCameraStatus};
 pub use video::filters::{
     FilterController, FilterPreset, FilterSettings, RendererProbe, RendererStatus,
 };
+pub use video::output::{OutputController, OutputMode};
+pub use video::preview::{PreviewFrame, PreviewHub, PreviewWait};
 pub use video::VideoCodec;
+
+/// How long the phone gets to answer each negotiation step.
+const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long [`CamdroidSession::stop`] waits for worker threads to finish.
+const SHUTDOWN_JOIN_BUDGET: Duration = Duration::from_millis(1500);
+/// How long a queued `stop` command gets to reach the wire before the socket closes.
+const STOP_FLUSH_BUDGET: Duration = Duration::from_millis(250);
 
 /// Configuration for a CamDroid streaming session.
 #[derive(Debug, Clone)]
@@ -40,6 +58,10 @@ pub struct SessionConfig {
     pub resolution: String,
     pub fps: u32,
     pub audio: bool,
+    /// Where frames go besides the in-app preview. Switchable at runtime.
+    pub output: OutputMode,
+    /// Display name for the phone when the transport does not supply one.
+    pub device_name: Option<String>,
     pub v4l2_device: String,
     pub audio_device: String,
     pub discovery_timeout: u64,
@@ -52,6 +74,8 @@ impl Default for SessionConfig {
             resolution: "1080p".to_string(),
             fps: 60,
             audio: true,
+            output: OutputMode::VirtualCamera,
+            device_name: None,
             v4l2_device: "/dev/video10".to_string(),
             audio_device: "CamDroid".to_string(),
             discovery_timeout: 5,
@@ -70,28 +94,50 @@ pub enum ConnectionMode {
     Discover,
 }
 
-/// Session status reported to the GUI.
-#[derive(Debug, Clone, serde::Serialize)]
+/// What the UI needs to render a connected session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionStatus {
     pub connected: bool,
-    pub streaming: bool,
     pub device_name: String,
     pub codec: String,
-    pub resolution: String,
+    pub width: u32,
+    pub height: u32,
     pub fps: u32,
-    pub battery: u32,
+    pub audio_enabled: bool,
+    pub telemetry: TelemetrySnapshot,
+}
+
+/// Raises the shutdown flag if negotiation is abandoned part-way, so threads
+/// that were already started do not outlive a failed connection attempt.
+struct AbortOnDrop {
+    shutdown: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shutdown.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A live CamDroid streaming session.
 ///
-/// Owns the TCP connection, video/audio decode pipelines, and v4l2/pulse
-/// output threads. Created via `CamdroidSession::connect()`.
+/// Owns the TCP connection and the decode, render and audio threads. Created
+/// via [`CamdroidSession::connect`]; dropping it tears everything down.
 pub struct CamdroidSession {
     writer: Arc<WriterHandle>,
     shutdown: Arc<AtomicBool>,
-    capabilities: ServerCapabilities,
+    stream: NegotiatedStream,
     config: SessionConfig,
+    device_name: String,
     filters: FilterController,
+    output: OutputController,
+    preview: PreviewHub,
+    telemetry: Telemetry,
+    threads: Mutex<Vec<JoinHandle<()>>>,
     _adb_guard: Option<connection::AdbForward>,
     _pulse_output: Option<audio::PulseOutput>,
 }
@@ -108,222 +154,193 @@ impl CamdroidSession {
         connection::discovery::discover_devices(timeout_secs)
     }
 
-    /// Connect to a CamDroid phone and start the streaming pipeline.
+    /// Connect to a CamDroid phone, negotiate a stream, and start the pipeline.
     pub fn connect(mode: ConnectionMode, config: SessionConfig) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let mut session = SessionMachine::new();
-        session
-            .apply(SessionEvent::ConnectRequested)
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-
-        // Determine the connection address
-        let (connect_addr, adb_guard) = match &mode {
-            ConnectionMode::Direct(addr) => {
-                if !addr.contains(':') {
-                    bail!(
-                        "Invalid address format: '{}'. Expected IP:PORT (e.g., 192.168.1.5:4747)",
-                        addr
-                    );
-                }
-                (addr.clone(), None)
-            }
-            ConnectionMode::Usb => {
-                let forward = connection::adb::setup_usb_connection()?;
-                let addr = forward.local_addr();
-                (addr.to_string(), Some(forward))
-            }
-            ConnectionMode::Discover => {
-                let devices = connection::discovery::discover_devices(config.discovery_timeout)?;
-                if devices.is_empty() {
-                    bail!(
-                        "No CamDroid devices found on the network.\n\
-                         Make sure:\n\
-                         1. The CamDroid app is running on your phone\n\
-                         2. Phone and PC are on the same WiFi network"
-                    );
-                }
-                let device = &devices[0];
-                info!(
-                    "Auto-discovered: {} at {}:{}",
-                    device.device_model, device.ip, device.port
-                );
-                (format!("{}:{}", device.ip, device.port), None)
-            }
+        let mut abort = AbortOnDrop {
+            shutdown: Arc::clone(&shutdown),
+            armed: true,
         };
+        let telemetry = Telemetry::default();
 
-        info!("Connecting to: {}", connect_addr);
+        let (connect_addr, adb_guard, discovered_name) = resolve_transport(&mode, &config)?;
+        let device_name = discovered_name
+            .or_else(|| config.device_name.clone())
+            .unwrap_or_else(|| "Android phone".to_string());
 
-        // Establish TCP connection
-        let (channels, writer) = if adb_guard.is_some() {
-            // For USB mode, the connect_addr is already set from the ADB forward
-            connection::tcp_client::connect(&*connect_addr, shutdown.clone())?
-        } else {
-            connection::tcp_client::connect(&*connect_addr, shutdown.clone())?
+        let mut machine = SessionMachine::new();
+        let transition = |machine: &mut SessionMachine, event| {
+            machine
+                .apply(event)
+                .map(|_| ())
+                .map_err(|error| anyhow::anyhow!(error.message))
         };
+        transition(&mut machine, SessionEvent::ConnectRequested)?;
 
+        let connection = connection::connect(&connect_addr, shutdown.clone(), telemetry.clone())?;
+        let connection::Connection {
+            channels,
+            writer,
+            keyframes,
+            intra_only,
+        } = connection;
         let writer = Arc::new(writer);
+        transition(&mut machine, SessionEvent::TransportConnected)?;
 
-        session
-            .apply(SessionEvent::TransportConnected)
-            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let send_message = |message: SessionMessage| -> Result<()> {
+            writer.send(protocol::Packet::metadata(&serde_json::to_value(message)?)?)
+        };
 
-        // Control negotiation is JSON metadata while Task 3 migrates media
-        // frames to the v2 binary envelope. No pipeline starts before accept.
-        let hello = SessionMessage::Hello {
+        send_message(SessionMessage::Hello {
             protocol_versions: vec![2],
             client: "camdroid-desktop".to_string(),
-        };
-        writer.send(protocol::Packet::metadata(&serde_json::to_value(hello)?)?)?;
+        })?;
 
-        // Wait for the phone's explicit v2 capability response.
-        info!("Waiting for server capabilities...");
-        let negotiated_capabilities: CapabilitySet = match channels
-            .metadata_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-        {
-            Ok(meta_bytes) => match serde_json::from_slice::<SessionMessage>(&meta_bytes)? {
-                SessionMessage::Capabilities(capabilities) => capabilities,
-                other => bail!("expected capabilities response, received {other:?}"),
-            },
-            Err(_) => bail!("timed out waiting for negotiated capabilities"),
-        };
-
-        session
-            .apply(SessionEvent::CapabilitiesReceived(
-                negotiated_capabilities.clone(),
-            ))
-            .map_err(|error| anyhow::anyhow!(error.message))?;
+        info!("Waiting for phone capabilities...");
+        let capabilities: CapabilitySet =
+            match channels.metadata_rx.recv_timeout(NEGOTIATION_TIMEOUT) {
+                Ok(bytes) => match serde_json::from_slice::<SessionMessage>(&bytes)? {
+                    SessionMessage::Capabilities(capabilities) => capabilities,
+                    other => bail!("expected capabilities response, received {other:?}"),
+                },
+                Err(_) => bail!("The phone did not answer. Is the CamDroid app streaming?"),
+            };
+        transition(
+            &mut machine,
+            SessionEvent::CapabilitiesReceived(capabilities.clone()),
+        )?;
 
         let (width, height) = parse_resolution(&config.resolution);
-        let stream_request = StreamRequest {
+        let desired = StreamRequest {
             config: protocol::v2::StreamConfig {
                 codec: config.codec.clone(),
                 width,
                 height,
                 fps: config.fps,
-                bitrate_bps: 8_000_000,
+                bitrate_bps: recommended_bitrate(width, height, config.fps, &config.codec),
                 profile: None,
                 level: None,
                 audio: None,
             },
             audio_enabled: config.audio,
         };
-        session
-            .apply(SessionEvent::StartRequested(stream_request.clone()))
+        let request = capabilities
+            .resolve(&desired)
             .map_err(|error| anyhow::anyhow!(error.message))?;
-        writer.send(protocol::Packet::metadata(&serde_json::to_value(
-            SessionMessage::Start(stream_request),
-        )?)?)?;
+        if request.config != desired.config {
+            info!(
+                "Phone offers {} {}x{}@{}; using that instead of {} {}x{}@{}",
+                request.config.codec,
+                request.config.width,
+                request.config.height,
+                request.config.fps,
+                desired.config.codec,
+                desired.config.width,
+                desired.config.height,
+                desired.config.fps
+            );
+        }
 
-        let accepted_stream = match channels
-            .metadata_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-        {
-            Ok(meta_bytes) => match serde_json::from_slice::<SessionMessage>(&meta_bytes)? {
+        let video_codec = VideoCodec::from_str(&request.config.codec)?;
+        intra_only.store(video_codec == VideoCodec::Mjpeg, Ordering::Relaxed);
+
+        transition(&mut machine, SessionEvent::StartRequested(request.clone()))?;
+        send_message(SessionMessage::Start(request))?;
+
+        let stream = match channels.metadata_rx.recv_timeout(NEGOTIATION_TIMEOUT) {
+            Ok(bytes) => match serde_json::from_slice::<SessionMessage>(&bytes)? {
                 SessionMessage::StreamAccepted(stream) => stream,
                 SessionMessage::StreamRejected(error) => {
-                    bail!("stream rejected: {}", error.message)
+                    bail!("The phone rejected the stream: {}", error.message)
                 }
                 other => bail!("expected stream acceptance, received {other:?}"),
             },
-            Err(_) => bail!("timed out waiting for stream acknowledgement"),
+            Err(_) => bail!("The phone did not acknowledge the stream request."),
         };
-        session
-            .apply(SessionEvent::StartAcknowledged(accepted_stream))
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-
-        let capabilities = ServerCapabilities {
-            version: "2.0".to_string(),
-            device: "negotiated phone".to_string(),
-            codecs: negotiated_capabilities.codecs.clone(),
-            resolutions: negotiated_capabilities
-                .video_modes
-                .iter()
-                .map(|mode| format!("{}x{}", mode.width, mode.height))
-                .collect(),
-            fps: negotiated_capabilities
-                .video_modes
-                .iter()
-                .map(|mode| mode.fps)
-                .collect(),
-            audio: !negotiated_capabilities.audio_codecs.is_empty(),
-            battery: 0,
-        };
+        transition(
+            &mut machine,
+            SessionEvent::StartAcknowledged(stream.clone()),
+        )?;
 
         info!(
-            "Connected to: {} (v{}, codecs: {:?}, battery: {}%)",
-            capabilities.device, capabilities.version, capabilities.codecs, capabilities.battery
+            "Connected to {device_name}: {} {}x{}@{}",
+            stream.config.codec, stream.config.width, stream.config.height, stream.config.fps
         );
 
-        let video_codec = VideoCodec::from_str(&config.codec)?;
-
-        // Create channel for decoded YUYV frames → v4l2loopback
-        let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Vec<u8>>(8);
         let filters = FilterController::default();
+        let output = OutputController::new(config.output);
+        let preview = PreviewHub::default();
+        let mut threads = Vec::new();
 
-        // Spawn video decoder thread
-        let _video_decoder_handle = video::decoder::spawn_decoder_thread(
-            video_codec,
-            channels.video_config_rx,
-            channels.video_rx,
-            frame_tx,
-            width,
-            height,
+        // Decoded frames are tiny in number (the decoder forwards one per
+        // batch) so a short queue keeps latency low.
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Vec<u8>>(4);
+        threads.push(video::decoder::spawn_decoder_thread(
+            video::decoder::DecoderConfig {
+                codec: video_codec,
+                width: stream.config.width,
+                height: stream.config.height,
+            },
+            video::decoder::DecoderChannels {
+                video_config_rx: channels.video_config_rx,
+                video_rx: channels.video_rx,
+                frame_tx,
+            },
+            telemetry.clone(),
+            keyframes,
             shutdown.clone(),
-        )?;
-
-        // Spawn v4l2loopback writer thread
-        let _v4l2_handle = video::v4l2_output::spawn_v4l2_writer_thread(
-            config.v4l2_device.clone(),
+        )?);
+        threads.push(video::render::spawn_render_thread(
+            video::render::RenderConfig {
+                device_path: config.v4l2_device.clone(),
+                width: stream.config.width,
+                height: stream.config.height,
+            },
             frame_rx,
-            width,
-            height,
-            config.fps,
-            filters.clone(),
+            video::render::RenderTargets {
+                filters: filters.clone(),
+                output: output.clone(),
+                preview: preview.clone(),
+                telemetry: telemetry.clone(),
+            },
             shutdown.clone(),
-        )?;
+        )?);
 
-        info!(
-            "Video pipeline started: {} → FFmpeg decoder → {}",
-            config.codec, config.v4l2_device
-        );
-
-        // Set up audio pipeline if enabled
-        let pulse_output = if config.audio {
-            let pulse = audio::PulseOutput::new(&config.audio_device)?;
-            let sink_name = pulse.sink_name().to_string();
-
-            let (pcm_tx, pcm_rx) = crossbeam_channel::bounded::<Vec<u8>>(240);
-
-            let _audio_decoder_handle = audio::aac_decoder::spawn_audio_decoder_thread(
+        let pulse_output = if stream.audio_enabled {
+            match start_audio(
+                &config.audio_device,
                 channels.audio_config_rx,
                 channels.audio_rx,
-                pcm_tx,
-                shutdown.clone(),
-            )?;
-
-            let _pulse_handle = audio::pulse_output::spawn_pulse_writer_thread(
-                pcm_rx,
-                sink_name,
-                shutdown.clone(),
-            )?;
-
-            info!(
-                "Audio pipeline started: AAC → FFmpeg decoder → PulseAudio ({})",
-                config.audio_device
-            );
-            Some(pulse)
+                &shutdown,
+            ) {
+                Ok((pulse, handles)) => {
+                    threads.extend(handles);
+                    Some(pulse)
+                }
+                Err(error) => {
+                    // Video is the product; a missing PulseAudio must not block it.
+                    warn!("Audio unavailable: {error:#}");
+                    telemetry.set_audio_error(format!("{error:#}"));
+                    None
+                }
+            }
         } else {
             info!("Audio disabled");
             None
         };
 
+        abort.armed = false;
         Ok(Self {
             writer,
             shutdown,
-            capabilities,
+            stream,
             config,
+            device_name,
             filters,
+            output,
+            preview,
+            telemetry,
+            threads: Mutex::new(threads),
             _adb_guard: adb_guard,
             _pulse_output: pulse_output,
         })
@@ -334,9 +351,9 @@ impl CamdroidSession {
         self.writer.send(protocol::Packet::control_cmd(cmd)?)
     }
 
-    /// Get the server capabilities reported at handshake time.
-    pub fn capabilities(&self) -> &ServerCapabilities {
-        &self.capabilities
+    /// The stream the phone agreed to, which may differ from what was asked for.
+    pub fn negotiated(&self) -> &NegotiatedStream {
+        &self.stream
     }
 
     /// Get the current session config.
@@ -344,25 +361,40 @@ impl CamdroidSession {
         &self.config
     }
 
-    /// The live filter selection applied to both standalone and virtual-camera output.
+    /// The live filter selection applied to the preview and virtual camera.
     pub fn filters(&self) -> FilterController {
         self.filters.clone()
+    }
+
+    /// Switches between app-only and virtual-camera output while streaming.
+    pub fn output(&self) -> OutputController {
+        self.output.clone()
+    }
+
+    /// Newest rendered frames for display inside an application window.
+    pub fn preview(&self) -> PreviewHub {
+        self.preview.clone()
+    }
+
+    pub fn telemetry(&self) -> Telemetry {
+        self.telemetry.clone()
     }
 
     /// Get the current session status.
     pub fn status(&self) -> SessionStatus {
         SessionStatus {
-            connected: !self.shutdown.load(Ordering::Relaxed),
-            streaming: !self.shutdown.load(Ordering::Relaxed),
-            device_name: self.capabilities.device.clone(),
-            codec: self.config.codec.clone(),
-            resolution: self.config.resolution.clone(),
-            fps: self.config.fps,
-            battery: self.capabilities.battery,
+            connected: self.is_alive(),
+            device_name: self.device_name.clone(),
+            codec: self.stream.config.codec.clone(),
+            width: self.stream.config.width,
+            height: self.stream.config.height,
+            fps: self.stream.config.fps,
+            audio_enabled: self.stream.audio_enabled,
+            telemetry: self.telemetry.snapshot(),
         }
     }
 
-    /// Check if the session is still alive.
+    /// True until the user stops the session or the connection is lost.
     pub fn is_alive(&self) -> bool {
         !self.shutdown.load(Ordering::Relaxed)
     }
@@ -377,24 +409,112 @@ impl CamdroidSession {
         self.writer.clone()
     }
 
-    /// Gracefully stop the streaming session.
+    /// Gracefully stops the session: tells the phone, closes the socket, and
+    /// waits (briefly) for the worker threads. Safe to call more than once.
     pub fn stop(&self) -> Result<()> {
-        info!("Stopping CamDroid session...");
-        // Send stop command to the phone
-        let _ = self.send_control(&ControlCommand::Stop);
-        // Signal all threads to shut down
-        self.shutdown.store(true, Ordering::Relaxed);
-        // Give threads a moment to finish
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        info!("CamDroid session stopped");
+        if self.is_alive() {
+            info!("Stopping CamDroid session...");
+            let _ = self.send_control(&ControlCommand::Stop);
+            self.writer.drain(STOP_FLUSH_BUDGET);
+        }
+        self.halt();
+        self.join_workers();
         Ok(())
+    }
+
+    /// Stops all pipeline activity without waiting for threads.
+    fn halt(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.writer.close();
+        self.preview.close();
+    }
+
+    fn join_workers(&self) {
+        let handles =
+            std::mem::take(&mut *self.threads.lock().unwrap_or_else(PoisonError::into_inner));
+        let deadline = Instant::now() + SHUTDOWN_JOIN_BUDGET;
+        for handle in handles {
+            while !handle.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                warn!("A worker thread did not stop in time; detaching it");
+            }
+        }
     }
 }
 
 impl Drop for CamdroidSession {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.halt();
     }
+}
+
+/// Works out the socket address (and a friendly device name when known).
+fn resolve_transport(
+    mode: &ConnectionMode,
+    config: &SessionConfig,
+) -> Result<(String, Option<connection::AdbForward>, Option<String>)> {
+    match mode {
+        ConnectionMode::Direct(addr) => {
+            if !addr.contains(':') {
+                bail!("Invalid address '{addr}'. Expected IP:PORT, for example 192.168.1.5:4747");
+            }
+            Ok((addr.clone(), None, None))
+        }
+        ConnectionMode::Usb => {
+            let forward = connection::adb::setup_usb_connection()?;
+            let address = forward.local_addr();
+            let name = forward.device_model();
+            Ok((address, Some(forward), name))
+        }
+        ConnectionMode::Discover => {
+            let devices = connection::discovery::discover_devices(config.discovery_timeout)?;
+            let Some(device) = devices.first() else {
+                bail!(
+                    "No CamDroid devices found on the network.\n\
+                     Make sure:\n\
+                     1. The CamDroid app is running on your phone\n\
+                     2. Phone and PC are on the same WiFi network"
+                );
+            };
+            info!(
+                "Auto-discovered: {} at {}:{}",
+                device.device_model, device.ip, device.port
+            );
+            Ok((
+                format!("{}:{}", device.ip, device.port),
+                None,
+                Some(device.device_model.clone()),
+            ))
+        }
+    }
+}
+
+/// Creates the virtual microphone and the threads that feed it.
+fn start_audio(
+    sink_name: &str,
+    audio_config_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    audio_rx: crossbeam_channel::Receiver<media_queue::TimedMediaFrame>,
+    shutdown: &Arc<AtomicBool>,
+) -> Result<(audio::PulseOutput, Vec<JoinHandle<()>>)> {
+    let pulse = audio::PulseOutput::new(sink_name)?;
+    let (pcm_tx, pcm_rx) = crossbeam_channel::bounded::<Vec<u8>>(240);
+    let decoder = audio::aac_decoder::spawn_audio_decoder_thread(
+        audio_config_rx,
+        audio_rx,
+        pcm_tx,
+        shutdown.clone(),
+    )?;
+    let writer = audio::pulse_output::spawn_pulse_writer_thread(
+        pcm_rx,
+        pulse.sink_name().to_string(),
+        shutdown.clone(),
+    )?;
+    info!("Audio pipeline started: AAC -> FFmpeg -> PulseAudio ({sink_name})");
+    Ok((pulse, vec![decoder, writer]))
 }
 
 /// Parse a resolution string into (width, height).

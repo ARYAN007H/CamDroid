@@ -107,7 +107,7 @@ fn audio_decoder_loop(
 
         // Fill a timestamp-bounded queue, retaining FIFO order but discarding
         // audio that would otherwise leave playback over a second behind.
-        if pending_audio.len() == 0 {
+        if pending_audio.is_empty() {
             match audio_rx.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(frame) => pending_audio.push(frame),
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
@@ -196,7 +196,7 @@ fn audio_decoder_loop(
                 }
             }
 
-            if frames_decoded % 1000 == 0 {
+            if frames_decoded.rem_euclid(1000) == 0 {
                 debug!("Audio: {} frames decoded", frames_decoded);
             }
         }

@@ -44,6 +44,11 @@ impl FilterPreset {
     }
 }
 
+/// Accepted ranges for the user-adjustable grade parameters.
+pub const TEMPERATURE_RANGE: std::ops::RangeInclusive<f32> = -1.0..=1.0;
+pub const SATURATION_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.5;
+pub const CONTRAST_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterSettings {
@@ -95,6 +100,15 @@ impl FilterSettings {
             || !self.contrast.is_finite()
         {
             bail!("filter settings must be finite");
+        }
+        if !TEMPERATURE_RANGE.contains(&self.temperature) {
+            bail!("temperature must be between -1.0 and 1.0");
+        }
+        if !SATURATION_RANGE.contains(&self.saturation) {
+            bail!("saturation must be between 0.0 and 2.5");
+        }
+        if !CONTRAST_RANGE.contains(&self.contrast) {
+            bail!("contrast must be between 0.5 and 2.0");
         }
         Ok(self)
     }
@@ -151,16 +165,60 @@ impl FilterSettings {
         ]
     }
 
-    pub fn apply_yuyv_frame(self, frame: &mut [u8]) {
-        for pair in frame.chunks_exact_mut(4) {
-            let graded = self.apply_yuyv([pair[0], pair[1], pair[2], pair[3]]);
-            pair.copy_from_slice(&graded);
+    /// Builds the per-channel lookup tables equivalent to [`Self::apply_yuyv`].
+    ///
+    /// The grade treats Y, U and V independently, so each channel is a pure
+    /// function of one byte. Precomputing 3x256 entries turns the per-pixel
+    /// float maths into three table reads, which is what keeps 1080p60
+    /// grading cheap on modest CPUs. The tables are derived from
+    /// `apply_yuyv` itself, so the two can never disagree.
+    pub fn lut(self) -> ColorLut {
+        let mut lut = ColorLut {
+            y: [0; 256],
+            u: [0; 256],
+            v: [0; 256],
+            identity: self.preset == FilterPreset::Natural || self.strength == 0.0,
+        };
+        for value in 0..=255_u8 {
+            let index = usize::from(value);
+            lut.y[index] = self.apply_yuyv([value, 128, value, 128])[0];
+            lut.u[index] = self.apply_yuyv([128, value, 128, 128])[1];
+            lut.v[index] = self.apply_yuyv([128, 128, 128, value])[3];
         }
-        if matches!(self.preset, FilterPreset::Cartoon) {
-            for pair in frame.chunks_exact_mut(4) {
-                pair[0] = (pair[0] / 32) * 32;
-                pair[2] = (pair[2] / 32) * 32;
-            }
+        lut
+    }
+
+    /// Applies only the colour component of the filter to a YUYV frame.
+    /// Spatial effects live in [`crate::video::effects`].
+    pub fn apply_yuyv_frame(self, frame: &mut [u8]) {
+        self.lut().apply(frame);
+    }
+}
+
+/// Precomputed colour grade; see [`FilterSettings::lut`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorLut {
+    y: [u8; 256],
+    u: [u8; 256],
+    v: [u8; 256],
+    identity: bool,
+}
+
+impl ColorLut {
+    /// True when applying the table would leave every frame unchanged.
+    pub fn is_identity(&self) -> bool {
+        self.identity
+    }
+
+    pub fn apply(&self, frame: &mut [u8]) {
+        if self.identity {
+            return;
+        }
+        for pair in frame.chunks_exact_mut(4) {
+            pair[0] = self.y[usize::from(pair[0])];
+            pair[1] = self.u[usize::from(pair[1])];
+            pair[2] = self.y[usize::from(pair[2])];
+            pair[3] = self.v[usize::from(pair[3])];
         }
     }
 }

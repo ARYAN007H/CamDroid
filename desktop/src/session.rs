@@ -97,6 +97,88 @@ impl CapabilitySet {
     }
 }
 
+impl CapabilitySet {
+    /// Adapts a desired stream to what the phone actually offers.
+    ///
+    /// The phone is authoritative: if the exact codec or mode is unavailable
+    /// the closest one is chosen instead of failing the whole connection. The
+    /// result is guaranteed to satisfy [`CapabilitySet::supports`].
+    pub fn resolve(&self, desired: &StreamRequest) -> Result<StreamRequest, SessionError> {
+        if !self.protocol_versions.contains(&2) {
+            return Err(SessionError {
+                code: SessionErrorCode::UnsupportedVersion,
+                message: "peer does not advertise protocol version 2".to_string(),
+            });
+        }
+        let unsupported = |message: &str| SessionError {
+            code: SessionErrorCode::UnsupportedMode,
+            message: message.to_string(),
+        };
+
+        let wanted_codec = &desired.config.codec;
+        let codec = self
+            .codecs
+            .iter()
+            .find(|codec| codec.eq_ignore_ascii_case(wanted_codec))
+            .or_else(|| {
+                self.codecs
+                    .iter()
+                    .find(|codec| codec.eq_ignore_ascii_case("h264"))
+            })
+            .or_else(|| self.codecs.first())
+            .ok_or_else(|| unsupported("the phone advertises no video codecs"))?;
+
+        let wanted_pixels = u64::from(desired.config.width) * u64::from(desired.config.height);
+        let mode = self
+            .video_modes
+            .iter()
+            .min_by_key(|mode| {
+                let pixels = u64::from(mode.width) * u64::from(mode.height);
+                (
+                    pixels.abs_diff(wanted_pixels),
+                    mode.fps.abs_diff(desired.config.fps),
+                )
+            })
+            .ok_or_else(|| unsupported("the phone advertises no video modes"))?;
+
+        let exact = mode.width == desired.config.width
+            && mode.height == desired.config.height
+            && mode.fps == desired.config.fps
+            && codec.eq_ignore_ascii_case(wanted_codec);
+        let target_bitrate = if exact {
+            desired.config.bitrate_bps
+        } else {
+            recommended_bitrate(mode.width, mode.height, mode.fps, codec)
+        };
+
+        Ok(StreamRequest {
+            config: StreamConfig {
+                codec: codec.clone(),
+                width: mode.width,
+                height: mode.height,
+                fps: mode.fps,
+                bitrate_bps: target_bitrate.clamp(mode.min_bitrate_bps, mode.max_bitrate_bps),
+                ..desired.config.clone()
+            },
+            audio_enabled: desired.audio_enabled && !self.audio_codecs.is_empty(),
+        })
+    }
+}
+
+/// A sensible target bitrate for a mode, in bits per second.
+///
+/// Based on bits per pixel per frame: H.265 reaches the same quality as H.264
+/// at roughly 60% of the rate, while MJPEG (no inter-frame prediction) needs
+/// several times more.
+pub fn recommended_bitrate(width: u32, height: u32, fps: u32, codec: &str) -> u64 {
+    let bits_per_pixel = match codec.to_ascii_lowercase().as_str() {
+        "h265" | "hevc" => 0.06,
+        "mjpeg" => 0.35,
+        _ => 0.10,
+    };
+    (f64::from(width) * f64::from(height) * f64::from(fps) * bits_per_pixel) as u64
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamRequest {
     pub config: StreamConfig,

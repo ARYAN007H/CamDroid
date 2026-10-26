@@ -43,6 +43,9 @@ fn control_loop(writer: Arc<WriterHandle>, shutdown: Arc<AtomicBool>) -> Result<
     // Print help on start
     print_help();
 
+    // The phone only understands absolute states, so "mirror" toggles locally.
+    let mut mirrored = false;
+
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -72,7 +75,7 @@ fn control_loop(writer: Arc<WriterHandle>, shutdown: Arc<AtomicBool>) -> Result<
         }
 
         // Parse and execute the command
-        match parse_and_send(&line, &writer) {
+        match parse_and_send(&line, &writer, &mut mirrored) {
             Ok(should_quit) => {
                 if should_quit {
                     info!("Quit command received, shutting down...");
@@ -91,7 +94,7 @@ fn control_loop(writer: Arc<WriterHandle>, shutdown: Arc<AtomicBool>) -> Result<
 
 /// Parse a command string and send the corresponding control packet.
 /// Returns `Ok(true)` if the user wants to quit.
-fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
+fn parse_and_send(input: &str, writer: &WriterHandle, mirrored: &mut bool) -> Result<bool> {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(false);
@@ -176,8 +179,8 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
         }
 
         "mirror" | "flip" => {
-            // Toggle — we don't track state here, just send the command
-            ControlCommand::SetMirror { enabled: true }
+            *mirrored = !*mirrored;
+            ControlCommand::SetMirror { enabled: *mirrored }
         }
 
         "camera" | "switch" => ControlCommand::SwitchCamera,

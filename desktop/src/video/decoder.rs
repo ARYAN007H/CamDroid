@@ -1,20 +1,38 @@
-// FFmpeg-based video decoder for H.264, H.265/HEVC, and MJPEG streams.
-//
-// Receives encoded NAL units (or JPEG frames), decodes them to raw video,
-// and converts the output to YUYV422 format for v4l2loopback.
+//! FFmpeg-based video decoder for H.264, H.265/HEVC, and MJPEG streams.
+//!
+//! Receives encoded access units, decodes them, and converts the newest
+//! picture to packed YUYV422 for the render stage.
+//!
+//! Every admitted packet is decoded in order, even when the decoder is
+//! briefly behind: inter-coded video cannot skip a frame without corrupting
+//! the ones after it. Latency is controlled instead by converting and
+//! forwarding only the newest picture of each batch, which is where most of
+//! the per-frame cost lies.
 
-use crate::media_queue::{LatestVideoQueue, TimedMediaFrame};
+use crate::connection::KeyframeRequester;
+use crate::media_queue::TimedMediaFrame;
+use crate::protocol::v2::MediaKind;
+use crate::telemetry::Telemetry;
 use anyhow::{bail, Context, Result};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 extern crate ffmpeg_next as ffmpeg;
 
 use ffmpeg::codec;
+use ffmpeg::format::Pixel;
 use ffmpeg::software::scaling;
+
+/// Capture timestamps travel as nanoseconds.
+const MEDIA_TIME_BASE: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
+/// How long to wait for the codec configuration before decoding without it.
+const CONFIG_TIMEOUT: Duration = Duration::from_secs(30);
+/// Consecutive rejected packets before a fresh key frame is requested.
+const KEYFRAME_REQUEST_AFTER_ERRORS: u32 = 3;
 
 /// Supported video codecs that the decoder can handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,9 +42,11 @@ pub enum VideoCodec {
     Mjpeg,
 }
 
-impl VideoCodec {
-    /// Parse a codec name string into the enum variant.
-    pub fn from_str(s: &str) -> Result<Self> {
+impl std::str::FromStr for VideoCodec {
+    type Err = anyhow::Error;
+
+    /// Parses a codec name such as `"h264"`, `"HEVC"` or `"mjpeg"`.
+    fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "h264" | "avc" => Ok(VideoCodec::H264),
             "h265" | "hevc" => Ok(VideoCodec::H265),
@@ -34,7 +54,9 @@ impl VideoCodec {
             _ => bail!("Unsupported codec: {}", s),
         }
     }
+}
 
+impl VideoCodec {
     /// Get the FFmpeg codec ID for this video codec.
     fn ffmpeg_id(&self) -> codec::Id {
         match self {
@@ -45,107 +67,167 @@ impl VideoCodec {
     }
 }
 
-/// Statistics tracked by the decoder for monitoring.
-#[derive(Debug, Default)]
-pub struct DecoderStats {
-    pub frames_decoded: u64,
-    pub frames_dropped: u64,
-    pub decode_errors: u64,
+/// What to decode and the geometry to produce.
+#[derive(Debug, Clone, Copy)]
+pub struct DecoderConfig {
+    pub codec: VideoCodec,
+    pub width: u32,
+    pub height: u32,
 }
 
-/// Spawn a decoder thread that reads encoded frames, decodes them, and outputs
-/// raw YUYV422 frames suitable for v4l2loopback.
-///
-/// # Arguments
-/// * `video_codec` - The codec to decode
-/// * `video_config_rx` - Channel receiving codec config data (SPS/PPS/VPS)
-/// * `video_rx` - Channel receiving timestamped encoded video frames
-/// * `frame_tx` - Channel to send decoded YUYV422 frames
-/// * `width` - Expected output width
-/// * `height` - Expected output height
-/// * `shutdown` - Shutdown signal
+/// Channels feeding and draining the decoder.
+pub struct DecoderChannels {
+    pub video_config_rx: Receiver<Vec<u8>>,
+    pub video_rx: Receiver<TimedMediaFrame>,
+    pub frame_tx: Sender<Vec<u8>>,
+}
+
+/// Spawns the decoder thread. Decoded YUYV422 frames are sent on
+/// `channels.frame_tx`; health is reported through `telemetry`.
 pub fn spawn_decoder_thread(
-    video_codec: VideoCodec,
-    video_config_rx: Receiver<Vec<u8>>,
-    video_rx: Receiver<TimedMediaFrame>,
-    frame_tx: Sender<Vec<u8>>,
-    width: u32,
-    height: u32,
+    config: DecoderConfig,
+    channels: DecoderChannels,
+    telemetry: Telemetry,
+    keyframes: KeyframeRequester,
     shutdown: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>> {
-    let handle = thread::Builder::new()
+    thread::Builder::new()
         .name("video-decoder".into())
         .spawn(move || {
-            if let Err(e) = decoder_loop(
-                video_codec,
-                video_config_rx,
-                video_rx,
-                frame_tx,
-                width,
-                height,
-                shutdown,
-            ) {
+            if let Err(e) = decoder_loop(config, channels, &telemetry, &keyframes, &shutdown) {
                 error!("Video decoder error: {:#}", e);
+                telemetry.set_disconnect_reason(format!("Video decoder stopped: {e:#}"));
             }
             info!("Video decoder thread exiting");
         })
-        .context("Failed to spawn video decoder thread")?;
-
-    Ok(handle)
+        .context("Failed to spawn video decoder thread")
 }
 
-/// Main decoder loop — initializes FFmpeg, decodes packets, scales output.
+/// Hands codec configuration (SPS/PPS or VPS/SPS/PPS) to FFmpeg.
+fn set_extradata(context: &mut codec::Context, config: &[u8]) {
+    // SAFETY: the buffer is allocated with av_mallocz plus the padding FFmpeg
+    // requires, fully initialised, and ownership transfers to the codec
+    // context, which frees it with the context.
+    unsafe {
+        let padded = config.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+        let buffer = ffmpeg::ffi::av_mallocz(padded) as *mut u8;
+        if buffer.is_null() {
+            warn!("Out of memory while storing codec configuration");
+            return;
+        }
+        std::ptr::copy_nonoverlapping(config.as_ptr(), buffer, config.len());
+        (*context.as_mut_ptr()).extradata = buffer;
+        (*context.as_mut_ptr()).extradata_size = config.len() as i32;
+    }
+}
+
+fn build_packet(unit: &TimedMediaFrame) -> ffmpeg::Packet {
+    let mut packet = ffmpeg::Packet::copy(&unit.packet.payload);
+    if unit.packet.session_id.0 != 0 {
+        let pts = i64::try_from(unit.packet.capture_timestamp.0).unwrap_or(i64::MAX);
+        packet.set_pts(Some(pts));
+        packet.set_dts(Some(pts));
+        packet.set_time_base(MEDIA_TIME_BASE);
+    }
+    packet
+}
+
+/// A swscale context together with the source format it was built for.
+struct Converter {
+    context: scaling::Context,
+    source: (Pixel, u32, u32),
+}
+
+impl Converter {
+    /// Converts `decoded` to YUYV422 at the target size, reusing the existing
+    /// context unless the decoder's output format changed mid-stream.
+    fn to_yuyv(
+        slot: &mut Option<Self>,
+        decoded: &ffmpeg::frame::Video,
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<Vec<u8>> {
+        let source = (decoded.format(), decoded.width(), decoded.height());
+        if slot.as_ref().map(|c| c.source) != Some(source) {
+            info!(
+                "Decoded picture {}x{} {:?} -> {}x{} YUYV422",
+                source.1, source.2, source.0, target_width, target_height
+            );
+            *slot = Some(Self {
+                context: scaling::Context::get(
+                    source.0,
+                    source.1,
+                    source.2,
+                    Pixel::YUYV422,
+                    target_width,
+                    target_height,
+                    scaling::Flags::BILINEAR,
+                )
+                .context("Failed to create pixel format scaler")?,
+                source,
+            });
+        }
+        let converter = slot.as_mut().expect("converter initialised above");
+
+        let mut output = ffmpeg::frame::Video::empty();
+        converter
+            .context
+            .run(decoded, &mut output)
+            .context("Failed to convert decoded frame")?;
+
+        // YUYV422 is packed, 2 bytes per pixel, in plane 0. Copy row by row
+        // because FFmpeg pads each row to its alignment.
+        let data = output.data(0);
+        let stride = output.stride(0);
+        let row_bytes = target_width as usize * 2;
+        let mut yuyv = Vec::with_capacity(row_bytes * target_height as usize);
+        for row in 0..target_height as usize {
+            let start = row * stride;
+            let end = start + row_bytes;
+            if end > data.len() {
+                bail!("converted frame is smaller than {target_width}x{target_height}");
+            }
+            yuyv.extend_from_slice(&data[start..end]);
+        }
+        Ok(yuyv)
+    }
+}
+
 fn decoder_loop(
-    video_codec: VideoCodec,
-    video_config_rx: Receiver<Vec<u8>>,
-    video_rx: Receiver<TimedMediaFrame>,
-    frame_tx: Sender<Vec<u8>>,
-    width: u32,
-    height: u32,
-    shutdown: Arc<AtomicBool>,
+    config: DecoderConfig,
+    channels: DecoderChannels,
+    telemetry: &Telemetry,
+    keyframes: &KeyframeRequester,
+    shutdown: &AtomicBool,
 ) -> Result<()> {
+    let DecoderChannels {
+        video_config_rx,
+        video_rx,
+        frame_tx,
+    } = channels;
     info!(
         "Video decoder starting: {:?} {}x{}",
-        video_codec, width, height
+        config.codec, config.width, config.height
     );
 
-    // Find the appropriate FFmpeg decoder
-    let codec = codec::decoder::find(video_codec.ffmpeg_id())
-        .with_context(|| format!("FFmpeg decoder not found for {:?}", video_codec))?;
-
+    let codec = codec::decoder::find(config.codec.ffmpeg_id())
+        .with_context(|| format!("FFmpeg decoder not found for {:?}", config.codec))?;
     let mut context = codec::Context::new_with_codec(codec);
-    let media_time_base = ffmpeg::Rational(1, 1_000_000_000);
-    context.set_time_base(media_time_base);
+    context.set_time_base(MEDIA_TIME_BASE);
 
-    // For MJPEG, we can start decoding immediately since each frame is independent.
-    // For H.264/H.265, we need the codec configuration (SPS/PPS) first.
-    if video_codec != VideoCodec::Mjpeg {
-        info!("Waiting for video codec configuration (SPS/PPS)...");
-
-        // Wait for the config data with a timeout
-        match video_config_rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(config_data) => {
-                info!("Received video config data: {} bytes", config_data.len());
-                // Set the extradata on the codec context — this contains
-                // SPS/PPS for H.264 or VPS/SPS/PPS for H.265.
-                unsafe {
-                    let extradata_ptr = ffmpeg::ffi::av_mallocz(
-                        config_data.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize,
-                    ) as *mut u8;
-                    if !extradata_ptr.is_null() {
-                        std::ptr::copy_nonoverlapping(
-                            config_data.as_ptr(),
-                            extradata_ptr,
-                            config_data.len(),
-                        );
-                        (*context.as_mut_ptr()).extradata = extradata_ptr;
-                        (*context.as_mut_ptr()).extradata_size = config_data.len() as i32;
-                    }
-                }
+    // MJPEG frames are self-contained. H.264/H.265 need their parameter sets
+    // before the first picture can be decoded.
+    if config.codec != VideoCodec::Mjpeg {
+        info!("Waiting for video codec configuration...");
+        match video_config_rx.recv_timeout(CONFIG_TIMEOUT) {
+            Ok(parameters) => {
+                info!("Received video config data: {} bytes", parameters.len());
+                set_extradata(&mut context, &parameters);
             }
-            Err(_) => {
-                warn!("No video config received within 30s, attempting to decode without it");
-            }
+            Err(_) => warn!(
+                "No video config received within {}s, decoding without it",
+                CONFIG_TIMEOUT.as_secs()
+            ),
         }
     }
 
@@ -153,169 +235,82 @@ fn decoder_loop(
         .decoder()
         .video()
         .context("Failed to open video decoder")?;
-
-    let mut stats = DecoderStats::default();
-    let mut scaler: Option<scaling::Context> = None;
-
-    // Target pixel format for v4l2loopback
-    let target_format = ffmpeg::format::Pixel::YUYV422;
-    let target_width = width;
-    let target_height = height;
-    let mut latest_video = LatestVideoQueue::new(3);
-
+    let mut converter: Option<Converter> = None;
+    let mut consecutive_errors = 0_u32;
     info!("Video decoder ready, processing frames...");
 
-    loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-
-        // Also drain any new config data (codec reconfiguration)
-        while let Ok(config) = video_config_rx.try_recv() {
-            debug!("Received updated video config: {} bytes", config.len());
-            // For mid-stream config changes, we feed it as a packet
-            let mut pkt = ffmpeg::Packet::copy(&config);
-            pkt.set_pts(None);
-            pkt.set_dts(None);
-            if let Err(e) = decoder.send_packet(&pkt) {
-                warn!("Failed to send config packet to decoder: {}", e);
+    while !shutdown.load(Ordering::Relaxed) {
+        // Parameter sets re-sent mid-stream (for example after a camera
+        // switch) are fed to the decoder as ordinary packets.
+        while let Ok(parameters) = video_config_rx.try_recv() {
+            debug!("Received updated video config: {} bytes", parameters.len());
+            let mut packet = ffmpeg::Packet::copy(&parameters);
+            packet.set_pts(None);
+            packet.set_dts(None);
+            if let Err(e) = decoder.send_packet(&packet) {
+                warn!("Failed to send config packet to decoder: {e}");
             }
         }
 
-        // Wake promptly, then drain any backlog and decode only its newest frame.
-        let frame = match video_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-            Ok(frame) => frame,
+        let first = match video_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(unit) => unit,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 info!("Video input channel disconnected");
                 break;
             }
         };
-        latest_video.push(frame);
-        while let Ok(frame) = video_rx.try_recv() {
-            latest_video.push(frame);
+
+        let mut newest: Option<ffmpeg::frame::Video> = None;
+        let mut decoded_in_batch = 0_u64;
+        let batch = std::iter::once(first).chain(std::iter::from_fn(|| video_rx.try_recv().ok()));
+        for unit in batch.filter(|unit| unit.packet.kind == MediaKind::Video) {
+            match decoder.send_packet(&build_packet(&unit)) {
+                Ok(()) => consecutive_errors = 0,
+                Err(e) => {
+                    debug!("Decoder rejected a packet: {e}");
+                    telemetry.record_decode_error();
+                    consecutive_errors += 1;
+                    if consecutive_errors >= KEYFRAME_REQUEST_AFTER_ERRORS {
+                        keyframes.request();
+                        consecutive_errors = 0;
+                    }
+                    continue;
+                }
+            }
+            loop {
+                let mut picture = ffmpeg::frame::Video::empty();
+                if decoder.receive_frame(&mut picture).is_err() {
+                    break;
+                }
+                decoded_in_batch += 1;
+                newest = Some(picture);
+            }
         }
-        let Some(frame) = latest_video.pop_newest() else {
+
+        telemetry.record_decoded(decoded_in_batch);
+        telemetry.record_dropped(decoded_in_batch.saturating_sub(1));
+
+        let Some(picture) = newest else {
             continue;
         };
-        if frame.packet.kind != crate::protocol::v2::MediaKind::Video {
-            continue;
-        }
-
-        // Create an FFmpeg packet from the raw encoded data
-        let mut packet = ffmpeg::Packet::copy(&frame.packet.payload);
-        if frame.packet.session_id.0 != 0 {
-            let pts = i64::try_from(frame.packet.capture_timestamp.0)
-                .context("capture timestamp exceeds FFmpeg PTS range")?;
-            packet.set_pts(Some(pts));
-            packet.set_dts(Some(pts));
-            packet.set_time_base(media_time_base);
-        }
-
-        // Send the packet to the decoder
-        if let Err(e) = decoder.send_packet(&packet) {
-            debug!("Decoder send_packet error (may be transient): {}", e);
-            stats.decode_errors += 1;
-            continue;
-        }
-
-        // Drain all decoded frames from this packet
-        let mut decoded_frame = ffmpeg::frame::Video::empty();
-        while decoder.receive_frame(&mut decoded_frame).is_ok() {
-            stats.frames_decoded += 1;
-
-            let src_width = decoded_frame.width();
-            let src_height = decoded_frame.height();
-            let src_format = decoded_frame.format();
-
-            // Initialize or reinitialize the scaler if the source format changed
-            if scaler.is_none() {
-                info!(
-                    "First decoded frame: {}x{} {:?} → {}x{} {:?}",
-                    src_width, src_height, src_format, target_width, target_height, target_format
-                );
-            }
-
-            // Create scaler on first frame or if dimensions change
-            let scaler_ctx = match scaler.as_mut() {
-                Some(s) => s,
-                None => {
-                    let s = scaling::Context::get(
-                        src_format,
-                        src_width,
-                        src_height,
-                        target_format,
-                        target_width,
-                        target_height,
-                        scaling::Flags::BILINEAR,
-                    )
-                    .context("Failed to create pixel format scaler")?;
-                    scaler = Some(s);
-                    scaler.as_mut().expect("just inserted")
-                }
-            };
-
-            // Scale/convert the decoded frame to YUYV422
-            let mut output_frame = ffmpeg::frame::Video::empty();
-            scaler_ctx
-                .run(&decoded_frame, &mut output_frame)
-                .context("Failed to scale frame")?;
-
-            // Extract the raw YUYV422 data from the output frame.
-            // YUYV422 is a packed format: 2 bytes per pixel, stored in plane 0.
-            let data = output_frame.data(0);
-            let stride = output_frame.stride(0);
-            let frame_height = target_height as usize;
-
-            // Copy row-by-row to handle stride != width*2
-            let row_bytes = (target_width * 2) as usize;
-            let mut yuyv_data = Vec::with_capacity(row_bytes * frame_height);
-            for row in 0..frame_height {
-                let offset = row * stride;
-                let end = offset + row_bytes;
-                if end <= data.len() {
-                    yuyv_data.extend_from_slice(&data[offset..end]);
-                }
-            }
-
-            // Send to the v4l2 output thread
-            match frame_tx.try_send(yuyv_data) {
+        match Converter::to_yuyv(&mut converter, &picture, config.width, config.height) {
+            Ok(yuyv) => match frame_tx.try_send(yuyv) {
                 Ok(()) => {}
-                Err(crossbeam_channel::TrySendError::Full(_)) => {
-                    stats.frames_dropped += 1;
-                    if stats.frames_dropped % 100 == 1 {
-                        debug!(
-                            "Dropped {} frames (v4l2 output can't keep up)",
-                            stats.frames_dropped
-                        );
-                    }
-                }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                Err(TrySendError::Full(_)) => telemetry.record_dropped(1),
+                Err(TrySendError::Disconnected(_)) => {
                     info!("Frame output channel disconnected");
                     return Ok(());
                 }
-            }
-
-            if stats.frames_decoded % 300 == 0 {
-                info!(
-                    "Decoder stats: {} decoded, {} dropped, {} errors",
-                    stats.frames_decoded, stats.frames_dropped, stats.decode_errors
-                );
+            },
+            Err(e) => {
+                warn!("Dropping a picture that could not be converted: {e:#}");
+                telemetry.record_decode_error();
             }
         }
     }
 
-    // Flush the decoder
     let _ = decoder.send_eof();
-    let mut decoded_frame = ffmpeg::frame::Video::empty();
-    while decoder.receive_frame(&mut decoded_frame).is_ok() {
-        stats.frames_decoded += 1;
-    }
-
-    info!(
-        "Decoder final stats: {} decoded, {} dropped, {} errors",
-        stats.frames_decoded, stats.frames_dropped, stats.decode_errors
-    );
-
+    info!("Video decoder stopped");
     Ok(())
 }

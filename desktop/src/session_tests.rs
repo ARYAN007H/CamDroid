@@ -186,3 +186,153 @@ fn negotiation_messages_preserve_the_selected_stream_across_json() {
 
     assert_eq!(decoded, message);
 }
+
+fn phone_with_modes(modes: Vec<VideoMode>, codecs: &[&str], audio: bool) -> CapabilitySet {
+    CapabilitySet {
+        protocol_versions: vec![2],
+        codecs: codecs.iter().map(|codec| codec.to_string()).collect(),
+        video_modes: modes,
+        audio_codecs: if audio {
+            vec!["aac".to_string()]
+        } else {
+            vec![]
+        },
+    }
+}
+
+fn mode(width: u32, height: u32, fps: u32) -> VideoMode {
+    VideoMode {
+        width,
+        height,
+        fps,
+        min_bitrate_bps: 1_000_000,
+        max_bitrate_bps: 50_000_000,
+    }
+}
+
+fn desired(codec: &str, width: u32, height: u32, fps: u32) -> StreamRequest {
+    let mut request = h264_request();
+    request.config.codec = codec.to_string();
+    request.config.width = width;
+    request.config.height = height;
+    request.config.fps = fps;
+    request.config.bitrate_bps = 8_000_000;
+    request
+}
+
+#[test]
+fn resolve_keeps_an_exactly_supported_request_unchanged() {
+    let phone = phone_with_modes(vec![mode(1920, 1080, 60)], &["h264"], true);
+    let resolved = phone.resolve(&desired("h264", 1920, 1080, 60)).unwrap();
+
+    assert_eq!(resolved.config.bitrate_bps, 8_000_000);
+    assert!(phone.supports(&resolved).is_ok());
+}
+
+#[test]
+fn resolve_falls_back_to_the_only_mode_the_phone_advertises() {
+    // The phone is configured for 1440p30 H.265; the desktop asked for 1080p60 H.264.
+    let phone = phone_with_modes(vec![mode(2560, 1440, 30)], &["h265"], true);
+    let resolved = phone.resolve(&desired("h264", 1920, 1080, 60)).unwrap();
+
+    assert_eq!(resolved.config.codec, "h265");
+    assert_eq!(
+        (
+            resolved.config.width,
+            resolved.config.height,
+            resolved.config.fps
+        ),
+        (2560, 1440, 30)
+    );
+    assert!(phone.supports(&resolved).is_ok());
+}
+
+#[test]
+fn resolve_prefers_the_closest_resolution_then_frame_rate() {
+    let phone = phone_with_modes(
+        vec![
+            mode(1280, 720, 60),
+            mode(1920, 1080, 30),
+            mode(3840, 2160, 30),
+        ],
+        &["h264"],
+        true,
+    );
+
+    let resolved = phone.resolve(&desired("h264", 1920, 1080, 60)).unwrap();
+    assert_eq!((resolved.config.width, resolved.config.fps), (1920, 30));
+}
+
+#[test]
+fn resolve_prefers_h264_when_the_requested_codec_is_missing() {
+    let phone = phone_with_modes(vec![mode(1920, 1080, 60)], &["mjpeg", "h264"], true);
+    let resolved = phone.resolve(&desired("h265", 1920, 1080, 60)).unwrap();
+
+    assert_eq!(resolved.config.codec, "h264");
+}
+
+#[test]
+fn resolve_keeps_the_bitrate_inside_the_advertised_range() {
+    let mut narrow = mode(1920, 1080, 60);
+    narrow.min_bitrate_bps = 2_000_000;
+    narrow.max_bitrate_bps = 6_000_000;
+    let phone = phone_with_modes(vec![narrow], &["h264"], true);
+
+    let resolved = phone.resolve(&desired("h264", 1920, 1080, 60)).unwrap();
+    assert_eq!(resolved.config.bitrate_bps, 6_000_000);
+    assert!(phone.supports(&resolved).is_ok());
+}
+
+#[test]
+fn resolve_turns_audio_off_when_the_phone_has_no_audio_codec() {
+    let phone = phone_with_modes(vec![mode(1920, 1080, 60)], &["h264"], false);
+    let resolved = phone.resolve(&desired("h264", 1920, 1080, 60)).unwrap();
+
+    assert!(!resolved.audio_enabled);
+    assert!(phone.supports(&resolved).is_ok());
+}
+
+#[test]
+fn resolve_reports_a_phone_with_nothing_to_offer() {
+    let no_modes = phone_with_modes(vec![], &["h264"], true);
+    assert_eq!(
+        no_modes
+            .resolve(&desired("h264", 1920, 1080, 60))
+            .unwrap_err()
+            .code,
+        SessionErrorCode::UnsupportedMode
+    );
+
+    let no_codecs = phone_with_modes(vec![mode(1920, 1080, 60)], &[], true);
+    assert_eq!(
+        no_codecs
+            .resolve(&desired("h264", 1920, 1080, 60))
+            .unwrap_err()
+            .code,
+        SessionErrorCode::UnsupportedMode
+    );
+
+    let mut v1_only = phone_with_modes(vec![mode(1920, 1080, 60)], &["h264"], true);
+    v1_only.protocol_versions = vec![1];
+    assert_eq!(
+        v1_only
+            .resolve(&desired("h264", 1920, 1080, 60))
+            .unwrap_err()
+            .code,
+        SessionErrorCode::UnsupportedVersion
+    );
+}
+
+#[test]
+fn recommended_bitrate_scales_with_pixels_frame_rate_and_codec() {
+    use crate::session::recommended_bitrate;
+
+    let h264_1080p30 = recommended_bitrate(1920, 1080, 30, "h264");
+    assert_eq!(
+        recommended_bitrate(1920, 1080, 60, "h264"),
+        h264_1080p30 * 2
+    );
+    assert!(recommended_bitrate(1920, 1080, 30, "h265") < h264_1080p30);
+    assert!(recommended_bitrate(1920, 1080, 30, "mjpeg") > h264_1080p30);
+    assert!((5_000_000..8_000_000).contains(&h264_1080p30));
+}
