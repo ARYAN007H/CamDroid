@@ -1,2 +1,24 @@
+# Local tooling
 .worktrees/
 .superpowers/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Build output
+/desktop/target/
+/desktop-tauri/src-tauri/target/
+/desktop-tauri/src-tauri/gen/
+/desktop-tauri/dist/
+/desktop-tauri/node_modules/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/captures/
+*.apk
+*.aab
+
+# Logs
+*.log
