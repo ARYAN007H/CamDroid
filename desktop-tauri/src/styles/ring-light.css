@@ -1,0 +1,27 @@
+/* The overlay is a transparent, click-through window: only the ring paints. */
+html,
+body {
+  background: transparent;
+}
+
+.ring {
+  --ring-color: #fff6e8;
+  --ring-alpha: 0.85;
+  --ring-width: 90px;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  opacity: var(--ring-alpha);
+  pointer-events: none;
+}
+
+/* A rounded, feathered hole; the giant spread shadow paints the ring around it. */
+.ring::before {
+  content: "";
+  position: absolute;
+  inset: var(--ring-width);
+  border-radius: calc(var(--ring-width) * 0.9);
+  box-shadow:
+    inset 0 0 calc(var(--ring-width) * 0.8) calc(var(--ring-width) * 0.1) var(--ring-color),
+    0 0 0 100vmax var(--ring-color);
+}

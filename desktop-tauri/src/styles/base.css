@@ -1,0 +1,163 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.4;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+#app {
+  position: relative;
+  height: 100%;
+}
+
+/* A hairline edge so the borderless window stays defined on dark wallpapers. */
+#app::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1000;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+input {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+svg {
+  display: block;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--surface-4);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Invisible grips around the borderless window so it can still be resized. */
+.resize-grip {
+  position: fixed;
+  z-index: 1100;
+}
+
+.resize-grip[data-dir="North"],
+.resize-grip[data-dir="South"] {
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.resize-grip[data-dir="East"],
+.resize-grip[data-dir="West"] {
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-grip[data-dir="North"] { top: 0; }
+.resize-grip[data-dir="South"] { bottom: 0; }
+.resize-grip[data-dir="East"] { right: 0; }
+.resize-grip[data-dir="West"] { left: 0; }
+
+.resize-grip[data-dir$="East"][data-dir^="North"],
+.resize-grip[data-dir$="West"][data-dir^="North"],
+.resize-grip[data-dir$="East"][data-dir^="South"],
+.resize-grip[data-dir$="West"][data-dir^="South"] {
+  width: 12px;
+  height: 12px;
+}
+
+.resize-grip[data-dir="NorthWest"] { top: 0; left: 0; cursor: nwse-resize; }
+.resize-grip[data-dir="NorthEast"] { top: 0; right: 0; cursor: nesw-resize; }
+.resize-grip[data-dir="SouthWest"] { bottom: 0; left: 0; cursor: nesw-resize; }
+.resize-grip[data-dir="SouthEast"] { bottom: 0; right: 0; cursor: nwse-resize; }
+
+.app-fullscreen .resize-grip {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

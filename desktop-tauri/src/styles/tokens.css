@@ -1,0 +1,40 @@
+/* Design tokens. Flat graphite surfaces, one accent, hairline borders.
+   There is deliberately no blur, translucency-as-glass or glow anywhere. */
+:root {
+  color-scheme: dark;
+
+  --bg: #0b0b0c;
+  --surface-1: #121214;
+  --surface-2: #19191c;
+  --surface-3: #222226;
+  --surface-4: #2c2c31;
+  --scrim: rgba(10, 10, 11, 0.86);
+
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+
+  --text: #f5f5f7;
+  --text-2: #a1a1a6;
+  --text-3: #6e6e73;
+
+  --accent: #ffd60a;
+  --accent-ink: #181400;
+  --accent-soft: rgba(255, 214, 10, 0.14);
+  --live: #ff453a;
+  --ok: #32d74b;
+  --warn: #ff9f0a;
+
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 18px;
+  --radius-pill: 999px;
+
+  --font: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", "Cantarell", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+
+  --panel-width: 328px;
+}

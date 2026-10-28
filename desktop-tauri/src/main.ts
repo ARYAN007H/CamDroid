@@ -1,30 +1,27 @@
-// CamDroid Desktop GUI — Entry Point
-//
-// Simple router: connection page → dashboard → back to connection on disconnect.
+import "@fontsource-variable/inter";
+import "./styles/tokens.css";
+import "./styles/base.css";
+import "./styles/components.css";
+import "./styles/connect.css";
+import "./styles/studio.css";
 
-import "./style.css";
-import { renderConnectionPage } from "./pages/connection";
-import { renderDashboard, stopStatusPolling } from "./pages/dashboard";
+import { errorMessage } from "./core/format";
+import { loadPlatform } from "./core/platform";
+import { startApp } from "./features/app";
 
-const app = document.getElementById("app")!;
+const root = document.getElementById("app");
+if (!root) throw new Error("#app is missing from index.html");
 
-type Page = "connection" | "dashboard";
-let currentPage: Page = "connection";
+loadPlatform()
+  .then((platform) => startApp(root, platform).catch((error: unknown) => showFatal(root, error, platform.window.show)))
+  .catch((error: unknown) => showFatal(root, error));
 
-function navigate(page: Page) {
-  currentPage = page;
-
-  if (page === "connection") {
-    stopStatusPolling();
-    renderConnectionPage(app, {
-      onConnected: () => navigate("dashboard"),
-    });
-  } else if (page === "dashboard") {
-    renderDashboard(app, {
-      onDisconnected: () => navigate("connection"),
-    });
-  }
+/** If start-up fails the window must still appear, with a readable reason. */
+function showFatal(host: HTMLElement, error: unknown, show?: () => Promise<void>): void {
+  host.innerHTML = "";
+  const message = document.createElement("pre");
+  message.style.cssText = "padding:32px;white-space:pre-wrap;color:#ffb4ae;font:13px ui-monospace,monospace;user-select:text";
+  message.textContent = `CamDroid could not start.\n\n${errorMessage(error)}`;
+  host.append(message);
+  void show?.();
 }
-
-// Start on the connection page
-navigate("connection");
