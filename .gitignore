@@ -22,3 +22,4 @@
 
 # Logs
 *.log
+/desktop-tauri/dist-mock/
