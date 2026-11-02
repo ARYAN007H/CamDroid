@@ -1,39 +1,41 @@
-# CamDroid Wire Protocol Specification v1.0
+# CamDroid Wire Protocol Specification v2.0
 
 ## Overview
 
-CamDroid uses a custom binary protocol over TCP to stream video, audio, and control
+CamDroid uses a custom binary protocol over TCP to stream video, audio, telemetry, and control
 commands between the Android phone (server) and the desktop client (receiver).
 
 The protocol is designed for:
-- **Minimal overhead**: 5-byte header per packet
-- **Low latency**: No container format buffering
-- **Bidirectional control**: Camera settings adjustable from desktop
+- **Minimal overhead**: 14-byte fixed header per packet with hardware presentation timestamps
+- **Ultra-low latency**: Zero container buffering, keyframe-aware queue shedding, and PTS pacing
+- **Bidirectional control & telemetry**: Real-time camera controls and 1Hz hardware status sync
 - **Codec agnostic**: Same framing for H.264, H.265, and MJPEG
 
 ## Transport
 
 - **WiFi**: TCP connection to phone's IP on port 4747 (configurable)
 - **USB**: ADB TCP port forwarding (`adb forward tcp:4747 tcp:4747`), then connect to `127.0.0.1:4747`
-- **Discovery**: mDNS service type `_camdroid._tcp.` with TXT records for capabilities
+- **Seamless Failover**: Background daemon monitors mDNS (`_camdroid._tcp.`) and `adb track-devices` to hot-swap Wi-Fi to USB without dropping virtual V4L2/PulseAudio devices.
 
-## Packet Format
+## Packet Format (v2.0)
 
 All multi-byte integers are **little-endian**.
 
 ```
-┌───────────────┬────────────────────┬──────────────────────────────┐
-│ Type (1 byte) │ Length (4 bytes LE) │ Payload (Length bytes)        │
-└───────────────┴────────────────────┴──────────────────────────────┘
+┌───────────────┬────────────────┬──────────────────────┬────────────────────┬────────────────────────┐
+│ Type (1 byte) │ Flags (1 byte) │ PTS_us (8 bytes LE)  │ Length (4 bytes LE)│ Payload (Length bytes) │
+└───────────────┴────────────────┴──────────────────────┴────────────────────┴────────────────────────┘
 ```
 
 ### Fields
 
-| Field  | Size    | Description                                    |
-|--------|---------|------------------------------------------------|
-| Type   | 1 byte  | Packet type identifier (see table below)       |
-| Length | 4 bytes | Payload length in bytes (little-endian uint32)  |
-| Payload| N bytes | Type-specific payload data                     |
+| Field   | Size    | Description                                                       |
+|---------|---------|-------------------------------------------------------------------|
+| Type    | 1 byte  | Packet type identifier (see table below)                          |
+| Flags   | 1 byte  | Bitmask: `0x01` = Keyframe (IDR), `0x02` = Codec Config, `0x04` = Mirrored |
+| PTS_us  | 8 bytes | Hardware presentation timestamp in microseconds (`int64` LE)      |
+| Length  | 4 bytes | Payload length in bytes (`uint32` LE)                             |
+| Payload | N bytes | Type-specific payload data                                        |
 
 Maximum payload size: 16 MB (16,777,216 bytes). Packets exceeding this are invalid.
 
@@ -44,29 +46,35 @@ Maximum payload size: 16 MB (16,777,216 bytes). Packets exceeding this are inval
 | VIDEO_FRAME   | `0x01` | Phone → PC    | Encoded video frame (NAL unit or JPEG)   |
 | AUDIO_FRAME   | `0x02` | Phone → PC    | Encoded audio frame (AAC with ADTS)      |
 | CONTROL_CMD   | `0x03` | PC → Phone    | JSON-encoded control command             |
-| METADATA      | `0x04` | Bidirectional | JSON-encoded metadata/configuration      |
-| HEARTBEAT     | `0x05` | Bidirectional | Keepalive (empty payload)                |
+| METADATA      | `0x04` | Bidirectional | JSON-encoded metadata/telemetry status   |
+| HEARTBEAT     | `0x05` | Bidirectional | Keepalive (empty payload, echoes PTS_us) |
 | VIDEO_CONFIG  | `0x06` | Phone → PC    | Codec configuration data (SPS/PPS/VPS)   |
 | AUDIO_CONFIG  | `0x07` | Phone → PC    | Audio configuration (AudioSpecificConfig)|
 
-## Connection Lifecycle
+## Connection Lifecycle (Two-Phase Handshake)
 
-### 1. Handshake
+### 1. Handshake (Capabilities Exchange)
 
 ```
-Client → Server:  METADATA { "version": "1.0", "client": "camdroid-desktop" }
+Client → Server:  METADATA { "version": "2.0", "client": "camdroid-desktop" }
 Server → Client:  METADATA {
-                    "version": "1.0",
+                    "type": "capabilities",
+                    "version": "2.0",
                     "device": "Pixel 7",
                     "codecs": ["h264", "h265", "mjpeg"],
                     "resolutions": ["1080p", "1440p", "4k"],
                     "fps": [30, 60],
                     "audio": true,
-                    "battery": 85
+                    "battery": 85,
+                    "min_zoom": 0.5,
+                    "max_zoom": 10.0
                   }
 ```
 
-### 2. Stream Start
+### 2. Stream Start (Client-Driven Encoder Initialization)
+
+The server waits for the client's `start` command before starting the hardware encoder so
+that the stream opens immediately with the client's requested codec, resolution, and FPS:
 
 ```
 Client → Server:  CONTROL_CMD {
@@ -76,12 +84,12 @@ Client → Server:  CONTROL_CMD {
                     "fps": 60,
                     "audio": true
                   }
-Server → Client:  VIDEO_CONFIG [SPS + PPS bytes for H.264]
-Server → Client:  AUDIO_CONFIG [AudioSpecificConfig bytes]
-Server → Client:  VIDEO_FRAME [IDR frame (keyframe)]
-Server → Client:  AUDIO_FRAME [AAC frame with ADTS header]
-Server → Client:  VIDEO_FRAME [P-frame]
-... (continuous streaming)
+Server → Client:  VIDEO_CONFIG [SPS + PPS bytes for H.264, Flags=0x02]
+Server → Client:  AUDIO_CONFIG [AudioSpecificConfig bytes, Flags=0x02]
+Server → Client:  VIDEO_FRAME [IDR frame (keyframe), Flags=0x01, PTS_us=...]
+Server → Client:  AUDIO_FRAME [AAC frame with ADTS header, PTS_us=...]
+Server → Client:  VIDEO_FRAME [P-frame, Flags=0x00, PTS_us=...]
+... (continuous streaming + 1Hz METADATA status telemetry)
 ```
 
 ### 3. Heartbeat

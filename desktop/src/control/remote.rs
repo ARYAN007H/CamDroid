@@ -132,8 +132,26 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
                         y: None,
                     }
                 }
+                "tap" => {
+                    let x = parts
+                        .get(2)
+                        .context("Usage: focus tap <x> <y> (0.0 to 1.0)")?
+                        .parse::<f32>()
+                        .context("Tap X must be a number between 0.0 and 1.0")?;
+                    let y = parts
+                        .get(3)
+                        .context("Usage: focus tap <x> <y> (0.0 to 1.0)")?
+                        .parse::<f32>()
+                        .context("Tap Y must be a number between 0.0 and 1.0")?;
+                    ControlCommand::SetFocus {
+                        mode: "tap".to_string(),
+                        distance: None,
+                        x: Some(x.clamp(0.0, 1.0)),
+                        y: Some(y.clamp(0.0, 1.0)),
+                    }
+                }
                 _ => {
-                    anyhow::bail!("Unknown focus mode: {}. Use 'auto' or 'manual'", mode);
+                    anyhow::bail!("Unknown focus mode: {}. Use 'auto', 'manual', or 'tap'", mode);
                 }
             }
         }

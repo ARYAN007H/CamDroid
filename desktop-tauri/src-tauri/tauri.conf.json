@@ -1,22 +1,22 @@
 {
-  "productName": "CamDroid",
+  "productName": "CamDroid Studio",
   "version": "2.0.0",
-  "identifier": "com.camdroid.desktop",
+  "identifier": "com.camdroid.studio",
   "build": {
-    "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "frontendDist": "../../dist",
+    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": "npm --prefix ../.. run dev",
+    "beforeBuildCommand": "npm --prefix ../.. run build"
   },
   "app": {
-    "title": "CamDroid",
+    "title": "CamDroid Studio",
     "windows": [
       {
-        "title": "CamDroid",
-        "width": 1100,
-        "height": 720,
-        "minWidth": 860,
-        "minHeight": 600,
+        "title": "CamDroid Studio — Continuity Camera",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
         "resizable": true,
         "decorations": true,
         "transparent": false
@@ -28,6 +28,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "category": "Video",
+    "shortDescription": "Continuity Camera & Pro Webcam Studio for Android + Desktop",
+    "longDescription": "High-performance Continuity Camera ecosystem streaming low-latency 60fps H.264/HEVC video and AAC audio from Android to macOS, Windows, and Linux with Virtual Ring Light, Studio Effects, Desk View, and OBS Virtual Camera integration."
   }
 }

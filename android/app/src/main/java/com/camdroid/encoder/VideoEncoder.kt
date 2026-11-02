@@ -3,6 +3,7 @@ package com.camdroid.encoder
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -12,8 +13,8 @@ import android.view.Surface
 /**
  * Hardware video encoder using MediaCodec.
  *
- * Supports H.264, H.265/HEVC, and MJPEG codecs with Surface input.
- * Provides an input Surface that can be connected to Camera2's CaptureSession.
+ * Configured for sub-frame low latency (zero B-frames, realtime priority,
+ * operating rate = target FPS, hardware low-latency mode on API 30+).
  */
 class VideoEncoder(
     private val config: EncoderConfig,
@@ -32,9 +33,11 @@ class VideoEncoder(
         private set
 
     /** Cached codec configuration data (SPS/PPS for H.264, VPS/SPS/PPS for H.265). */
+    @Volatile
     var codecConfigData: ByteArray? = null
         private set
 
+    @Volatile
     private var isRunning = false
 
     /**
@@ -42,7 +45,7 @@ class VideoEncoder(
      * Must be called before accessing [inputSurface].
      */
     fun start() {
-        Log.i(TAG, "Starting encoder: ${config.codec.displayName} ${config.resolution.displayName} @ ${config.fps}fps, ${config.bitrate / 1_000_000}Mbps")
+        Log.i(TAG, "Starting low-latency encoder: ${config.codec.displayName} ${config.resolution.displayName} @ ${config.fps}fps, ${config.bitrate / 1_000_000}Mbps")
 
         handlerThread = HandlerThread("VideoEncoder").also { it.start() }
         handler = Handler(handlerThread!!.looper)
@@ -57,6 +60,17 @@ class VideoEncoder(
             setInteger(MediaFormat.KEY_FRAME_RATE, config.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, config.iFrameInterval)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+
+            // Low-latency hardware encoder tuning: disable B-frames, set realtime priority
+            setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = realtime priority
+            setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
+            setInteger(MediaFormat.KEY_LATENCY, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            }
         }
 
         val codec = MediaCodec.createEncoderByType(config.codec.mimeType)
@@ -69,7 +83,7 @@ class VideoEncoder(
 
         encoder = codec
         isRunning = true
-        Log.i(TAG, "Encoder started, input surface ready")
+        Log.i(TAG, "Encoder started with zero-B-frame low-latency profile")
     }
 
     /** Dynamically update the encoder bitrate (for adaptive bitrate). */
@@ -90,7 +104,7 @@ class VideoEncoder(
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
             }
             enc.setParameters(params)
-            Log.d(TAG, "Keyframe requested")
+            Log.d(TAG, "Immediate IDR keyframe requested")
         }
     }
 
@@ -124,6 +138,9 @@ class VideoEncoder(
             val outputBuffer = codec.getOutputBuffer(index) ?: return
 
             try {
+                outputBuffer.position(info.offset)
+                outputBuffer.limit(info.offset + info.size)
+
                 if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                     // Codec configuration data (SPS/PPS for H.264, VPS/SPS/PPS for H.265)
                     val configData = ByteArray(info.size)
@@ -134,6 +151,13 @@ class VideoEncoder(
                     val isKeyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                     val frameData = ByteArray(info.size)
                     outputBuffer.get(frameData)
+
+                    // Re-emit SPS/PPS before every IDR keyframe so mid-stream joiners decode cleanly
+                    if (isKeyFrame) {
+                        codecConfigData?.let { cfg ->
+                            onEncodedData(cfg, true, false, info.presentationTimeUs)
+                        }
+                    }
                     onEncodedData(frameData, false, isKeyFrame, info.presentationTimeUs)
                 }
             } finally {
@@ -150,3 +174,4 @@ class VideoEncoder(
         }
     }
 }
+

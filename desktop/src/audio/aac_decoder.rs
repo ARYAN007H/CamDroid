@@ -18,16 +18,18 @@ use ffmpeg::software::resampling;
 use ffmpeg::util::format::sample::Sample;
 use ffmpeg::util::channel_layout::ChannelLayout;
 
+use crate::connection::MediaPacket;
+
 /// Spawn a thread that decodes AAC audio and outputs PCM S16LE samples.
 ///
 /// # Arguments
 /// * `audio_config_rx` - Channel receiving AudioSpecificConfig data
-/// * `audio_rx` - Channel receiving AAC frames (with ADTS headers)
+/// * `audio_rx` - Channel receiving AAC frames (with ADTS headers and hardware PTS)
 /// * `pcm_tx` - Channel to send decoded PCM S16LE data
 /// * `shutdown` - Shutdown signal
 pub fn spawn_audio_decoder_thread(
     audio_config_rx: Receiver<Vec<u8>>,
-    audio_rx: Receiver<Vec<u8>>,
+    audio_rx: Receiver<MediaPacket>,
     pcm_tx: Sender<Vec<u8>>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>> {
@@ -47,7 +49,7 @@ pub fn spawn_audio_decoder_thread(
 /// Main audio decoder loop.
 fn audio_decoder_loop(
     audio_config_rx: Receiver<Vec<u8>>,
-    audio_rx: Receiver<Vec<u8>>,
+    audio_rx: Receiver<MediaPacket>,
     pcm_tx: Sender<Vec<u8>>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -60,7 +62,7 @@ fn audio_decoder_loop(
     let mut context = codec::Context::new_with_codec(codec);
 
     // Optionally set extradata from AudioSpecificConfig if received
-    match audio_config_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+    match audio_config_rx.recv_timeout(std::time::Duration::from_millis(800)) {
         Ok(config_data) => {
             info!(
                 "Received audio config data: {} bytes",
@@ -82,7 +84,7 @@ fn audio_decoder_loop(
             }
         }
         Err(_) => {
-            info!("No audio config received, proceeding with ADTS-only frames");
+            info!("No audio config received within 800ms, proceeding with ADTS-only frames");
         }
     }
 
@@ -96,14 +98,15 @@ fn audio_decoder_loop(
     let target_layout = ChannelLayout::MONO;
 
     info!("Audio decoder ready, processing frames...");
+    let mut decoded_frame = ffmpeg::frame::Audio::empty();
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
 
-        // Receive AAC frame data
-        let aac_data = match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+        // Receive AAC frame data with hardware PTS
+        let media_pkt = match audio_rx.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(data) => data,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -113,7 +116,8 @@ fn audio_decoder_loop(
         };
 
         // Create an FFmpeg packet from the raw AAC data (with ADTS header)
-        let packet = ffmpeg::Packet::copy(&aac_data);
+        let mut packet = ffmpeg::Packet::copy(&media_pkt.data);
+        packet.set_pts(Some(media_pkt.pts_us));
 
         // Send to decoder
         if let Err(e) = decoder.send_packet(&packet) {
@@ -122,7 +126,6 @@ fn audio_decoder_loop(
         }
 
         // Drain decoded frames
-        let mut decoded_frame = ffmpeg::frame::Audio::empty();
         while decoder.receive_frame(&mut decoded_frame).is_ok() {
             frames_decoded += 1;
 

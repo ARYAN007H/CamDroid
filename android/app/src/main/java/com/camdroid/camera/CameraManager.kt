@@ -1,8 +1,11 @@
 package com.camdroid.camera
 
 import android.content.Context
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
+import android.hardware.camera2.params.MeteringRectangle
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -10,7 +13,6 @@ import android.util.Range
 import android.util.Size
 import android.view.Surface
 import com.camdroid.encoder.ResolutionPreset
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -22,7 +24,8 @@ import kotlin.coroutines.resumeWithException
  * 1. Preview surface (for on-screen display via SurfaceTexture)
  * 2. Encoder surface (MediaCodec input for video encoding)
  *
- * Also provides camera controls: zoom, focus, exposure, white balance, flash, mirror.
+ * Supports multi-lens optical zoom handoff (0.5x Ultra-Wide to Telephoto via CONTROL_ZOOM_RATIO),
+ * tap-to-focus / tap-to-expose metering regions, manual ISO/shutter, and white balance.
  */
 class CameraManager(private val context: Context) {
     companion object {
@@ -42,23 +45,30 @@ class CameraManager(private val context: Context) {
 
     // Camera characteristics
     private var characteristics: CameraCharacteristics? = null
+    var minZoom: Float = 1f
+        private set
     var maxZoom: Float = 1f
         private set
     var sensorOrientation: Int = 0
         private set
 
     // Current control state
-    private var currentZoom = 1f
-    private var flashEnabled = false
-    private var mirrorEnabled = false
+    var currentZoom = 1f
+        private set
+    var flashEnabled = false
+        private set
+    var mirrorEnabled = false
+        private set
 
     /** Initialize the camera handler thread. */
     fun initialize() {
-        cameraThread = HandlerThread("CameraThread").also { it.start() }
-        cameraHandler = Handler(cameraThread!!.looper)
+        if (cameraThread == null) {
+            cameraThread = HandlerThread("CameraThread").also { it.start() }
+            cameraHandler = Handler(cameraThread!!.looper)
+        }
     }
 
-    /** Get the camera ID for the requested facing (front or back). */
+    /** Get the logical camera ID for the requested facing (front or back). */
     private fun getCameraId(useFront: Boolean): String? {
         val facing = if (useFront) CameraCharacteristics.LENS_FACING_FRONT
                      else CameraCharacteristics.LENS_FACING_BACK
@@ -74,23 +84,12 @@ class CameraManager(private val context: Context) {
         val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: return Size(preset.width, preset.height)
         val sizes = map.getOutputSizes(SurfaceTexture::class.java) ?: return Size(preset.width, preset.height)
 
-        // Find exact match or closest larger size
         return sizes.firstOrNull { it.width == preset.width && it.height == preset.height }
             ?: sizes.filter { it.width >= preset.width && it.height >= preset.height }
                 .minByOrNull { it.width.toLong() * it.height }
             ?: sizes.maxByOrNull { it.width.toLong() * it.height }
             ?: Size(preset.width, preset.height)
     }
-
-    /**
-     * Open the camera and create a capture session with the given output surfaces.
-     *
-     * @param previewSurface Surface for on-screen preview
-     * @param encoderSurface Surface from MediaCodec encoder for video encoding
-     * @param useFront Whether to use the front camera
-     * @param targetFps Target frame rate
-     */
-
 
     @Suppress("MissingPermission")
     suspend fun openCamera(
@@ -103,14 +102,26 @@ class CameraManager(private val context: Context) {
         currentCameraId = cameraId
         isUsingFrontCamera = useFront
 
-        characteristics = systemCameraManager.getCameraCharacteristics(cameraId)
-        val maxZoomRatio = characteristics?.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
-        maxZoom = maxZoomRatio
-        sensorOrientation = characteristics?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val chars = systemCameraManager.getCameraCharacteristics(cameraId)
+        characteristics = chars
 
-        Log.i(TAG, "Opening camera $cameraId (${if (useFront) "front" else "back"}), maxZoom=$maxZoom, orientation=$sensorOrientation")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val zoomRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            if (zoomRange != null) {
+                minZoom = zoomRange.lower
+                maxZoom = zoomRange.upper
+            } else {
+                minZoom = 1f
+                maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+            }
+        } else {
+            minZoom = 1f
+            maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+        }
+        sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
 
-        // Open the camera device
+        Log.i(TAG, "Opening camera $cameraId (${if (useFront) "front" else "back"}), zoomRange=[$minZoom..$maxZoom], orientation=$sensorOrientation")
+
         val device = suspendCancellableCoroutine<CameraDevice> { cont ->
             systemCameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
@@ -128,28 +139,21 @@ class CameraManager(private val context: Context) {
         }
         cameraDevice = device
 
-        // Create capture request with both surfaces as targets
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
             previewSurface?.let { addTarget(it) }
             addTarget(encoderSurface)
 
-            // Auto focus
             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-            // Auto exposure
             set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            // Auto white balance
             set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-            // Video stabilization
             set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
 
-            // Set target FPS range
             val fpsRange = findBestFpsRange(targetFps)
             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
             Log.i(TAG, "FPS range: $fpsRange")
         }
         captureRequestBuilder = builder
 
-        // Create capture session with output surfaces
         val session = suspendCancellableCoroutine<CameraCaptureSession> { cont ->
             val callback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
@@ -165,7 +169,7 @@ class CameraManager(private val context: Context) {
                 add(encoderSurface)
             }
 
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val outputs = targets.map { android.hardware.camera2.params.OutputConfiguration(it) }
                 val sessionConfig = android.hardware.camera2.params.SessionConfiguration(
                     android.hardware.camera2.params.SessionConfiguration.SESSION_REGULAR,
@@ -181,29 +185,27 @@ class CameraManager(private val context: Context) {
         }
         captureSession = session
 
-        // Start the repeating capture request
         session.setRepeatingRequest(builder.build(), null, cameraHandler)
         Log.i(TAG, "Camera capture session started")
     }
 
-    /** Find the best FPS range that includes the target FPS. */
     private fun findBestFpsRange(targetFps: Int): Range<Int> {
         val ranges = characteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return Range(30, 30)
 
-        // Prefer exact match where upper == targetFps
+        // Prefer fixed framerate range [targetFps, targetFps] for consistent video pacing
+        val fixed = ranges.firstOrNull { it.lower == targetFps && it.upper == targetFps }
+        if (fixed != null) return fixed
+
         val exact = ranges.firstOrNull { it.upper == targetFps }
         if (exact != null) return exact
 
-        // Prefer range that includes targetFps
         val containing = ranges.filter { it.lower <= targetFps && it.upper >= targetFps }
             .maxByOrNull { it.upper }
         if (containing != null) return containing
 
-        // Fall back to highest available range
         return ranges.maxByOrNull { it.upper } ?: Range(30, 30)
     }
 
-    /** Apply the current capture request settings. */
     private fun applySettings() {
         val builder = captureRequestBuilder ?: return
         val session = captureSession ?: return
@@ -216,38 +218,80 @@ class CameraManager(private val context: Context) {
 
     // ========== Camera Controls ==========
 
-    /** Set the zoom ratio (1.0 = no zoom). */
+    /**
+     * Set the zoom ratio (e.g., 0.5 = ultra-wide, 1.0 = main wide, 2.0/5.0 = telephoto).
+     * Uses CONTROL_ZOOM_RATIO on Android 11+ for seamless multi-lens optical handoff.
+     */
     fun setZoom(ratio: Float) {
         val builder = captureRequestBuilder ?: return
         val chars = characteristics ?: return
-        val clampedRatio = ratio.coerceIn(1f, maxZoom)
+        val clampedRatio = ratio.coerceIn(minZoom, maxZoom)
         currentZoom = clampedRatio
 
-        val sensorRect = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
-        val cropWidth = (sensorRect.width() / clampedRatio).toInt()
-        val cropHeight = (sensorRect.height() / clampedRatio).toInt()
-        val cropLeft = (sensorRect.width() - cropWidth) / 2
-        val cropTop = (sensorRect.height() - cropHeight) / 2
-        val cropRect = android.graphics.Rect(cropLeft, cropTop, cropLeft + cropWidth, cropTop + cropHeight)
-
-        builder.set(CaptureRequest.SCALER_CROP_REGION, cropRect)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) != null) {
+            builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, clampedRatio)
+        } else {
+            val sensorRect = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+            val effectiveRatio = clampedRatio.coerceAtLeast(1f)
+            val cropWidth = (sensorRect.width() / effectiveRatio).toInt()
+            val cropHeight = (sensorRect.height() / effectiveRatio).toInt()
+            val cropLeft = (sensorRect.width() - cropWidth) / 2
+            val cropTop = (sensorRect.height() - cropHeight) / 2
+            val cropRect = Rect(cropLeft, cropTop, cropLeft + cropWidth, cropTop + cropHeight)
+            builder.set(CaptureRequest.SCALER_CROP_REGION, cropRect)
+        }
         applySettings()
         Log.d(TAG, "Zoom set to ${clampedRatio}x")
     }
 
-    /** Set focus mode: "auto" or "manual" with distance in diopters. */
-    fun setFocus(mode: String, distance: Float? = null) {
+    /**
+     * Set focus mode: "auto", "manual" (with distance in diopters), or "tap" (normalized 0..1 x, y).
+     */
+    fun setFocus(mode: String, distance: Float? = null, tapX: Float? = null, tapY: Float? = null) {
         val builder = captureRequestBuilder ?: return
+        val chars = characteristics ?: return
+
         when (mode) {
             "auto" -> {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                builder.set(CaptureRequest.CONTROL_AF_REGIONS, null)
+                applySettings()
             }
             "manual" -> {
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
                 distance?.let { builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, it) }
+                applySettings()
+            }
+            "tap" -> {
+                val sensorRect = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+                val nx = (tapX ?: 0.5f).coerceIn(0.05f, 0.95f)
+                val ny = (tapY ?: 0.5f).coerceIn(0.05f, 0.95f)
+                val halfBox = (sensorRect.width() * 0.075f).toInt().coerceAtLeast(64)
+                val cx = (nx * sensorRect.width()).toInt()
+                val cy = (ny * sensorRect.height()).toInt()
+                val focusRect = Rect(
+                    (cx - halfBox).coerceAtLeast(0),
+                    (cy - halfBox).coerceAtLeast(0),
+                    (cx + halfBox).coerceAtMost(sensorRect.width()),
+                    (cy + halfBox).coerceAtMost(sensorRect.height())
+                )
+                val region = arrayOf(MeteringRectangle(focusRect, MeteringRectangle.METERING_WEIGHT_MAX - 1))
+
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                builder.set(CaptureRequest.CONTROL_AF_REGIONS, region)
+                builder.set(CaptureRequest.CONTROL_AE_REGIONS, region)
+                applySettings()
+
+                // Trigger AF lock on the tapped region
+                try {
+                    builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+                    captureSession?.capture(builder.build(), null, cameraHandler)
+                    builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to trigger tap AF", e)
+                }
             }
         }
-        applySettings()
     }
 
     /** Set exposure compensation in EV steps. */
@@ -294,17 +338,16 @@ class CameraManager(private val context: Context) {
         applySettings()
     }
 
-    /** Set whether the video should be mirrored. */
+    /** Set whether the video should be mirrored (propagated in v2.0 frame flags). */
     fun setMirror(enabled: Boolean) {
         mirrorEnabled = enabled
-        // Note: mirroring is applied in the OpenGL rendering or by the receiver
     }
 
     /** Close the camera and release all resources. */
     fun close() {
-        captureSession?.close()
+        try { captureSession?.close() } catch (_: Exception) {}
         captureSession = null
-        cameraDevice?.close()
+        try { cameraDevice?.close() } catch (_: Exception) {}
         cameraDevice = null
         captureRequestBuilder = null
         cameraThread?.quitSafely()
@@ -313,3 +356,4 @@ class CameraManager(private val context: Context) {
         Log.i(TAG, "Camera closed")
     }
 }
+

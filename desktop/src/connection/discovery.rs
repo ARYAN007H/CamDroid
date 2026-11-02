@@ -41,10 +41,25 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
         .context("Failed to start mDNS browsing")?;
 
     let mut devices = Vec::new();
-    let timeout = Duration::from_secs(timeout_secs);
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut first_found_at: Option<std::time::Instant> = None;
 
     loop {
-        match receiver.recv_timeout(timeout) {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        // Recommendation #5: Once at least one CamDroid phone is resolved on the LAN,
+        // wait only 250ms more for any secondary devices instead of blocking the UI
+        // for the entire 5-second timeout.
+        if let Some(found_time) = first_found_at {
+            if now.duration_since(found_time) >= Duration::from_millis(250) {
+                break;
+            }
+        }
+
+        let poll_wait = Duration::from_millis(100).min(deadline.saturating_duration_since(now));
+        match receiver.recv_timeout(poll_wait) {
             Ok(event) => match event {
                 mdns_sd::ServiceEvent::ServiceResolved(info) => {
                     let name = info.get_fullname().to_string();
@@ -84,6 +99,9 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                             device_model: device_model.clone(),
                         });
                     }
+                    if first_found_at.is_none() && !devices.is_empty() {
+                        first_found_at = Some(std::time::Instant::now());
+                    }
                 }
                 mdns_sd::ServiceEvent::SearchStarted(_) => {
                     debug!("mDNS search started");
@@ -98,9 +116,8 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                     debug!("mDNS search stopped");
                 }
             },
-            Err(_) => {
-                break;
-            }
+            Err(mdns_sd::flume::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
         }
     }
 
