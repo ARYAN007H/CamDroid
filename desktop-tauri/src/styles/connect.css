@@ -2,7 +2,7 @@
   position: absolute;
   inset: 0;
   display: flex;
-  padding: 56px 24px 28px;
+  padding: 48px 24px 20px;
   overflow-y: auto;
 }
 

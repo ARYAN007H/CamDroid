@@ -11,7 +11,7 @@
 //! preview ticks are discarded without being touched.
 
 use crate::telemetry::{Telemetry, VirtualCameraStatus};
-use crate::video::effects::EffectEngine;
+use crate::video::effects::{mirror_yuyv, EffectEngine};
 use crate::video::filters::{ColorLut, FilterController, FilterSettings};
 use crate::video::output::{OutputController, OutputMode};
 use crate::video::preview::{decimate_yuyv, yuyv_to_rgb, PreviewGeometry, PreviewHub};
@@ -163,8 +163,16 @@ impl Renderer {
         self.refresh_lut(settings);
         let preview_due = self.preview_due(now);
 
+        let mirrored = self.targets.output.is_mirrored();
         let wants_virtual_camera = self.targets.output.mode() == OutputMode::VirtualCamera;
         if wants_virtual_camera && self.ensure_sink(now) {
+            if mirrored {
+                mirror_yuyv(
+                    &mut frame,
+                    self.config.width as usize,
+                    self.config.height as usize,
+                );
+            }
             self.grade_full_frame(&settings, &mut frame);
             self.write_to_sink(&frame, now);
             if preview_due {
@@ -175,7 +183,7 @@ impl Renderer {
                 self.release_sink();
             }
             if preview_due {
-                self.publish_graded_preview(&settings, &frame, now);
+                self.publish_graded_preview(&settings, &frame, mirrored, now);
             }
         }
 
@@ -274,8 +282,17 @@ impl Renderer {
     }
 
     /// Preview of a raw frame: shrink first, then grade the small image.
-    fn publish_graded_preview(&mut self, settings: &FilterSettings, raw: &[u8], now: Instant) {
+    fn publish_graded_preview(
+        &mut self,
+        settings: &FilterSettings,
+        raw: &[u8],
+        mirrored: bool,
+        now: Instant,
+    ) {
         decimate_yuyv(raw, self.geometry, &mut self.small);
+        if mirrored {
+            mirror_yuyv(&mut self.small, self.geometry.width, self.geometry.height);
+        }
         if let Some((_, lut)) = &self.lut {
             lut.apply(&mut self.small);
         }
@@ -418,6 +435,31 @@ mod tests {
                 .all(|p| p[0] == p[1] && p[1] == p[2]),
             "noir must be neutral grey"
         );
+    }
+
+    #[test]
+    fn mirroring_flips_the_preview_horizontally() {
+        let targets = targets(OutputMode::Standalone);
+        let mut renderer = renderer(&targets);
+        let start = Instant::now();
+
+        // Left half black, right half white.
+        let mut split = Vec::new();
+        for _row in 0..H {
+            for pair in 0..(W / 2) {
+                let luma = if pair < W / 4 { 16 } else { 235 };
+                split.extend_from_slice(&[luma, 128, luma, 128]);
+            }
+        }
+
+        renderer.process(split.clone(), start);
+        let plain = latest(&targets, 0).unwrap();
+        assert!(plain.rgb[0] < 20 && plain.rgb[(W as usize - 1) * 3] > 235);
+
+        targets.output.set_mirrored(true);
+        renderer.process(split, start + Duration::from_millis(100));
+        let flipped = latest(&targets, plain.sequence).unwrap();
+        assert!(flipped.rgb[0] > 235 && flipped.rgb[(W as usize - 1) * 3] < 20);
     }
 
     #[test]

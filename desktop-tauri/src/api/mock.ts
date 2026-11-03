@@ -57,8 +57,12 @@ export function createMockPlatform(): Platform {
   let connectedAt: number | null = null;
   let previewTimer = 0;
 
+  // Visit the mock with #lost to see the connection-lost screen a few seconds after connecting.
+  const dropped = (): boolean =>
+    location.hash.includes("lost") && connectedAt !== null && Date.now() - connectedAt > 3500;
+
   const status = (): SessionStatus => ({
-    connected: connectedAt !== null,
+    connected: connectedAt !== null && !dropped(),
     deviceName: "Pixel 8 Pro",
     codec: studio.stream.codec,
     width: 1920,
@@ -76,7 +80,7 @@ export function createMockPlatform(): Platform {
           ? { state: "failed", detail: "Failed to open /dev/video10. Make sure v4l2loopback is loaded." }
           : { state: "inactive" },
       audioError: null,
-      disconnectReason: null,
+      disconnectReason: dropped() ? "The phone closed the connection." : null,
     },
   });
 

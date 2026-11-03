@@ -208,6 +208,29 @@ impl EffectEngine {
     }
 }
 
+/// Flips a packed YUYV frame left to right, in place.
+///
+/// Reversing the pixel order of a row reverses its 4-byte pairs and swaps the
+/// two luma samples inside each pair; the shared chroma stays with its pair.
+pub fn mirror_yuyv(frame: &mut [u8], width: usize, height: usize) {
+    let stride = width * 2;
+    if width < 2 || width & 1 != 0 || frame.len() < stride * height {
+        return;
+    }
+    for row in frame[..stride * height].chunks_exact_mut(stride) {
+        let pairs = width / 2;
+        for left in 0..pairs / 2 {
+            let right = pairs - 1 - left;
+            for index in 0..4 {
+                row.swap(left * 4 + index, right * 4 + index);
+            }
+        }
+        for pair in row.chunks_exact_mut(4) {
+            pair.swap(0, 2);
+        }
+    }
+}
+
 /// Gradient magnitude at a pixel and whether the edge is mostly vertical
 /// (a horizontal luma change). Uses central differences with clamped borders.
 fn edge_at(luma: &[u8], width: usize, height: usize, x: usize, y: usize) -> (i32, bool) {
@@ -399,6 +422,41 @@ mod tests {
         engine.apply(&settings(FilterPreset::Cartoon, 1.0), &mut frame, W, H);
 
         assert_eq!(luma_at(&frame, W / 2, 3), Y_MIN as u8);
+    }
+
+    #[test]
+    fn mirror_reverses_each_row_and_keeps_chroma_with_its_pair() {
+        // Two rows of four pixels: pairs (Y0 U Y1 V) (Y2 U' Y3 V').
+        let mut frame = vec![
+            10, 100, 11, 200, 12, 101, 13, 201, //
+            20, 102, 21, 202, 22, 103, 23, 203,
+        ];
+        mirror_yuyv(&mut frame, 4, 2);
+
+        assert_eq!(
+            frame,
+            vec![
+                13, 101, 12, 201, 11, 100, 10, 200, //
+                23, 103, 22, 203, 21, 102, 20, 202,
+            ]
+        );
+    }
+
+    #[test]
+    fn mirroring_twice_restores_the_original_frame() {
+        let original = ramp();
+        let mut frame = original.clone();
+        mirror_yuyv(&mut frame, W, H);
+        assert_ne!(frame, original);
+        mirror_yuyv(&mut frame, W, H);
+        assert_eq!(frame, original);
+    }
+
+    #[test]
+    fn mirror_ignores_buffers_that_do_not_match_the_geometry() {
+        let mut short = vec![1, 2, 3, 4];
+        mirror_yuyv(&mut short, 8, 2);
+        assert_eq!(short, vec![1, 2, 3, 4]);
     }
 
     #[test]

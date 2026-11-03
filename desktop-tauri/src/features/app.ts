@@ -117,7 +117,8 @@ function registerShortcuts(controller: Controller): Keymap {
     keymap.add({
       keys: [String(index + 1)],
       group: "Looks",
-      description: index === 0 ? "Pick a look by number (1 to 9)" : "",
+      description: index === 0 ? "Pick a look by number" : "",
+      display: ["1–9"],
       hidden: true,
       when: live,
       handler: () => controller.selectPresetAt(index),

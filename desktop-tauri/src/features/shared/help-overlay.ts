@@ -45,7 +45,7 @@ export function createHelpOverlay(controller: Controller, keymap: Keymap): { el:
           "div",
           { class: "help-row" },
           h("span", {}, shortcut.description),
-          h("span", { class: "help-keys" }, ...comboLabels(keys).map((label) => h("span", { class: "kbd" }, label))),
+          h("span", { class: "help-keys" }, ...(shortcut.display ?? comboLabels(keys)).map((label) => h("span", { class: "kbd" }, label))),
         ),
       );
       byGroup.set(shortcut.group, rows);

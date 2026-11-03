@@ -5,7 +5,7 @@
 //! session is live, so it is a shared atomic rather than a start-up option.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -34,21 +34,39 @@ impl OutputMode {
     }
 }
 
-/// Live, lock-free handle to the active [`OutputMode`].
+/// Live, lock-free handle to how frames are delivered: the [`OutputMode`] and
+/// whether the picture is mirrored.
+///
+/// Mirroring is applied here, on the receiving side, because the phone's
+/// camera pipeline does not flip the encoded video.
 #[derive(Debug, Clone)]
-pub struct OutputController(Arc<AtomicU8>);
+pub struct OutputController {
+    mode: Arc<AtomicU8>,
+    mirrored: Arc<AtomicBool>,
+}
 
 impl OutputController {
     pub fn new(mode: OutputMode) -> Self {
-        Self(Arc::new(AtomicU8::new(mode.to_bits())))
+        Self {
+            mode: Arc::new(AtomicU8::new(mode.to_bits())),
+            mirrored: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn mode(&self) -> OutputMode {
-        OutputMode::from_bits(self.0.load(Ordering::Relaxed))
+        OutputMode::from_bits(self.mode.load(Ordering::Relaxed))
     }
 
     pub fn set(&self, mode: OutputMode) {
-        self.0.store(mode.to_bits(), Ordering::Relaxed);
+        self.mode.store(mode.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn is_mirrored(&self) -> bool {
+        self.mirrored.load(Ordering::Relaxed)
+    }
+
+    pub fn set_mirrored(&self, mirrored: bool) {
+        self.mirrored.store(mirrored, Ordering::Relaxed);
     }
 }
 
@@ -70,6 +88,16 @@ mod tests {
 
         controller.set(OutputMode::VirtualCamera);
         assert_eq!(observer.mode(), OutputMode::VirtualCamera);
+    }
+
+    #[test]
+    fn mirroring_is_shared_and_off_by_default() {
+        let controller = OutputController::default();
+        let observer = controller.clone();
+        assert!(!observer.is_mirrored());
+
+        controller.set_mirrored(true);
+        assert!(observer.is_mirrored());
     }
 
     #[test]

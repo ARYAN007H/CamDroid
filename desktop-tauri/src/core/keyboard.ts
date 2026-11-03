@@ -51,6 +51,8 @@ export interface Shortcut {
   keys: string[];
   group: string;
   description: string;
+  /** Key caps shown in the help overlay instead of the first combo (e.g. "1–9"). */
+  display?: string[];
   /** Hidden from the help overlay (for example number keys, listed as one row). */
   hidden?: boolean;
   /** Fires even while a text field has focus (Escape, Ctrl+Q). */

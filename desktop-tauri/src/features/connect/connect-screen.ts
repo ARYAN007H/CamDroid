@@ -409,6 +409,19 @@ export function createConnectScreen(controller: Controller): Screen {
     usbNote.textContent = "adb was not found. Install android-tools (Arch) or android-tools-adb (Debian/Ubuntu).";
   }
 
+  // Nothing is focused on first load (a focus ring there would look like a selection),
+  // so the arrow keys pick a method from a cold start.
+  const onWindowKey = (event: KeyboardEvent): void => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    if (document.activeElement !== document.body || store.get().connecting) return;
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const index = METHODS.findIndex((info) => info.id === method);
+    const next = METHODS[(index + step + METHODS.length) % METHODS.length];
+    if (next) selectMethod(next.id, true);
+  };
+  window.addEventListener("keydown", onWindowKey);
+
   const unsubscribe = store.subscribe(sync);
   renderDiscover();
   selectMethod("discover");
@@ -416,9 +429,9 @@ export function createConnectScreen(controller: Controller): Screen {
 
   return {
     el,
-    focus: () => methodButtons.get(method)?.focus(),
     destroy() {
       destroyed = true;
+      window.removeEventListener("keydown", onWindowKey);
       unsubscribe();
     },
   };

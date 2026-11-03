@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -201,14 +201,7 @@ impl SettingsStore {
             .spawn(move || {
                 // Wait for a change, then for the user to stop changing things.
                 while signals.recv().is_ok() {
-                    loop {
-                        match signals.recv_timeout(SAVE_QUIET_PERIOD) {
-                            Ok(()) => continue,
-                            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
-                                break
-                            }
-                        }
-                    }
+                    while signals.recv_timeout(SAVE_QUIET_PERIOD).is_ok() {}
                     let snapshot = locked(&worker_settings).clone();
                     if let Err(error) = snapshot.save(&worker_path) {
                         log::error!("Could not save settings: {error}");
@@ -269,14 +262,19 @@ mod tests {
     fn settings_round_trip_through_disk() {
         let dir = scratch_dir("roundtrip");
         let path = dir.join(FILE_NAME);
-        let mut settings = Settings::default();
-        settings.output_mode = OutputMode::VirtualCamera;
-        settings.filter = FilterSettings::for_preset(FilterPreset::Noir);
-        settings.wifi = WifiTarget {
-            host: "192.168.1.67".into(),
-            port: 4747,
+        let settings = Settings {
+            output_mode: OutputMode::VirtualCamera,
+            filter: FilterSettings::for_preset(FilterPreset::Noir),
+            wifi: WifiTarget {
+                host: "192.168.1.67".into(),
+                port: 4747,
+            },
+            stream: StreamPreferences {
+                fps: 30,
+                ..StreamPreferences::default()
+            },
+            ..Settings::default()
         };
-        settings.stream.fps = 30;
 
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
