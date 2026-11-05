@@ -2,6 +2,8 @@ import type { Api } from "../../api/api";
 import type {
   CameraCommand,
   ConnectRequest,
+  FeedAspect,
+  FeedRotation,
   FilterPresetId,
   FilterSettings,
   RingLightSettings,
@@ -221,6 +223,21 @@ export class Controller {
     this.store.set({ studio: { ...studio, mirror } });
     await this.guard(this.api.setMirror(mirror));
     this.toast.show(mirror ? "Mirror on" : "Mirror off");
+  }
+
+  /** Rotates the stage picture a quarter turn; purely desktop-side. */
+  rotateFeed(direction: -1 | 1): void {
+    const { studio } = this.store.get();
+    const rotation = (((((studio.rotation ?? 0) + direction * 90) % 360) + 360) % 360) as FeedRotation;
+    this.store.set({ studio: { ...studio, rotation } });
+    void this.guard(this.api.setFeedTransform(rotation, studio.aspect));
+    this.toast.show(direction === 1 ? "Rotated 90° right" : "Rotated 90° left");
+  }
+
+  setAspect(aspect: FeedAspect): void {
+    const { studio } = this.store.get();
+    this.store.set({ studio: { ...studio, aspect } });
+    void this.guard(this.api.setFeedTransform(studio.rotation ?? 0, aspect));
   }
 
   async toggleVirtualCamera(): Promise<void> {

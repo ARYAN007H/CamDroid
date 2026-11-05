@@ -91,7 +91,12 @@ pub fn show(app: &AppHandle, settings: RingLightSettings) -> CommandResult<()> {
     }
 
     // Input must pass straight through to whatever is underneath.
-    window.set_ignore_cursor_events(true)?;
+    // Skip on Wayland: tao 0.35's CursorIgnoreEvents handler unwraps
+    // window.window(), which is None on Wayland (input shapes are X11-only)
+    // and aborts the whole process on the ring light's first click-through.
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        window.set_ignore_cursor_events(true)?;
+    }
     window.show()?;
     app.emit_to(WINDOW_LABEL, UPDATE_EVENT, settings.clamped())?;
     Ok(())

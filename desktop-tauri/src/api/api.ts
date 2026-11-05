@@ -2,6 +2,8 @@ import type {
   CameraCommand,
   ConnectRequest,
   DeviceInfo,
+  FeedAspect,
+  FeedRotation,
   FilterSettings,
   OutputMode,
   PresetInfo,
@@ -29,6 +31,7 @@ export interface Api {
   setFilter(filter: FilterSettings): Promise<void>;
   setOutputMode(mode: OutputMode): Promise<void>;
   setMirror(enabled: boolean): Promise<void>;
+  setFeedTransform(rotation: FeedRotation, aspect: FeedAspect): Promise<void>;
   setRingLight(settings: RingLightSettings): Promise<void>;
   setRingLightVisible(visible: boolean): Promise<void>;
 

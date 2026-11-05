@@ -102,6 +102,8 @@ function registerShortcuts(controller: Controller): Keymap {
     { keys: ["e"], group: "Studio", description: "Looks", when: live, handler: () => controller.toggleTray() },
     { keys: ["i"], group: "Studio", description: "Adjust panel", when: live, handler: () => controller.togglePanel() },
     { keys: ["m"], group: "Studio", description: "Mirror", when: live, handler: () => void controller.toggleMirror() },
+    { keys: ["z"], group: "Studio", description: "Rotate feed left", when: live, handler: () => controller.rotateFeed(-1) },
+    { keys: ["x"], group: "Studio", description: "Rotate feed right", when: live, handler: () => controller.rotateFeed(1) },
     { keys: ["r"], group: "Studio", description: "Ring light", when: live, handler: () => void controller.toggleRingLight() },
     { keys: ["o"], group: "Studio", description: "Virtual camera", when: live, handler: () => void controller.toggleVirtualCamera() },
 

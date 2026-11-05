@@ -48,6 +48,8 @@ export function createMockPlatform(): Platform {
   let studio: StudioState = {
     outputMode: "standalone",
     mirror: false,
+    rotation: 0,
+    aspect: "source",
     filter: PRESETS[0]!.settings,
     ringLight: { brightness: 0.85, warmth: 0.1, thickness: 0.09 },
     ringLightVisible: false,
@@ -147,6 +149,9 @@ export function createMockPlatform(): Platform {
     },
     setMirror: async (mirror) => {
       studio = { ...studio, mirror };
+    },
+    setFeedTransform: async (rotation, aspect) => {
+      studio = { ...studio, rotation, aspect };
     },
     setRingLight: async (ringLight) => {
       studio = { ...studio, ringLight };

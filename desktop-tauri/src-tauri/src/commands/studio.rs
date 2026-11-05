@@ -17,6 +17,8 @@ use tauri::{AppHandle, State};
 pub struct StudioState {
     pub output_mode: OutputMode,
     pub mirror: bool,
+    pub rotation: u16,
+    pub aspect: String,
     pub filter: FilterSettings,
     pub ring_light: RingLightSettings,
     pub ring_light_visible: bool,
@@ -54,6 +56,8 @@ pub fn get_studio_state(app: AppHandle, state: State<'_, AppState>) -> StudioSta
     StudioState {
         output_mode: settings.output_mode,
         mirror: settings.mirror,
+        rotation: settings.rotation,
+        aspect: settings.aspect,
         filter: settings.filter,
         ring_light: settings.ring_light,
         ring_light_visible: ring_light::is_visible(&app),
@@ -74,6 +78,20 @@ pub fn set_output_mode(state: State<'_, AppState>, mode: OutputMode) {
 pub fn set_mirror(state: State<'_, AppState>, enabled: bool) {
     state.settings.update(|settings| settings.mirror = enabled);
     state.try_with_session(|session| session.output().set_mirrored(enabled));
+}
+
+/// Stage rotation and crop are pure desktop-side presentation: persisting them
+/// is all a set needs to do.
+#[tauri::command]
+pub fn set_feed_transform(state: State<'_, AppState>, rotation: u16, aspect: String) {
+    state.settings.update(|settings| {
+        if rotation % 90 == 0 && rotation <= 270 {
+            settings.rotation = rotation;
+        }
+        if matches!(aspect.as_str(), "source" | "16:9" | "4:3" | "1:1" | "9:16") {
+            settings.aspect = aspect;
+        }
+    });
 }
 
 #[tauri::command]
@@ -99,8 +117,10 @@ pub fn set_ring_light(
     ring_light::push_update(&app, settings)
 }
 
+// Must stay sync: window creation has to run on the main thread, and async
+// commands execute on the async runtime. Sync commands run on the main thread.
 #[tauri::command]
-pub async fn set_ring_light_visible(
+pub fn set_ring_light_visible(
     app: AppHandle,
     state: State<'_, AppState>,
     visible: bool,

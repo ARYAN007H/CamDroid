@@ -48,6 +48,7 @@ pub fn run() {
             commands::studio::get_studio_state,
             commands::studio::set_output_mode,
             commands::studio::set_mirror,
+            commands::studio::set_feed_transform,
             commands::studio::set_filter,
             commands::studio::set_ring_light,
             commands::studio::set_ring_light_visible,

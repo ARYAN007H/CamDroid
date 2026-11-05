@@ -110,6 +110,10 @@ impl Default for WifiTarget {
 pub struct Settings {
     pub output_mode: OutputMode,
     pub mirror: bool,
+    /// Studio-stage rotation of the feed, degrees clockwise (0/90/180/270).
+    pub rotation: u16,
+    /// Studio-stage crop of the feed, applied before rotation.
+    pub aspect: String,
     pub filter: FilterSettings,
     pub ring_light: RingLightSettings,
     pub stream: StreamPreferences,
@@ -121,6 +125,8 @@ impl Default for Settings {
         Self {
             output_mode: OutputMode::Standalone,
             mirror: false,
+            rotation: 0,
+            aspect: "source".to_string(),
             filter: FilterSettings::for_preset(FilterPreset::Natural),
             ring_light: RingLightSettings::default(),
             stream: StreamPreferences::default(),
@@ -138,6 +144,15 @@ impl Settings {
         }
         if self.stream.validate().is_err() {
             self.stream = defaults.stream;
+        }
+        if self.rotation % 90 != 0 || self.rotation > 270 {
+            self.rotation = defaults.rotation;
+        }
+        if !matches!(
+            self.aspect.as_str(),
+            "source" | "16:9" | "4:3" | "1:1" | "9:16"
+        ) {
+            self.aspect = defaults.aspect;
         }
         self.ring_light = self.ring_light.clamped();
         self

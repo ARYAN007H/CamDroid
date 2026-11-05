@@ -54,9 +54,16 @@ export interface WifiTarget {
   port: number;
 }
 
+export type FeedRotation = 0 | 90 | 180 | 270;
+export type FeedAspect = "source" | "16:9" | "4:3" | "1:1" | "9:16";
+
 export interface StudioState {
   outputMode: OutputMode;
   mirror: boolean;
+  /** Desktop-side stage rotation of the feed, in degrees clockwise. */
+  rotation: FeedRotation;
+  /** Desktop-side stage crop of the feed, applied before rotation. */
+  aspect: FeedAspect;
   filter: FilterSettings;
   ringLight: RingLightSettings;
   ringLightVisible: boolean;

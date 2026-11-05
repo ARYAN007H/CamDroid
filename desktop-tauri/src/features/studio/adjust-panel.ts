@@ -1,4 +1,4 @@
-import type { WhiteBalance } from "../../api/types";
+import type { FeedAspect, WhiteBalance } from "../../api/types";
 import { h } from "../../core/dom";
 import { formatCodec, formatCount, formatPercent, formatSigned } from "../../core/format";
 import { icon } from "../../ui/icons";
@@ -134,6 +134,18 @@ export function createAdjustPanel(controller: Controller): { el: HTMLElement; de
   );
 
   // Output -----------------------------------------------------------------------
+  const aspect = createSegmented<FeedAspect>({
+    label: "Aspect",
+    value: "source",
+    options: [
+      { value: "source", label: "Source" },
+      { value: "16:9", label: "16:9" },
+      { value: "4:3", label: "4:3" },
+      { value: "1:1", label: "1:1" },
+      { value: "9:16", label: "9:16" },
+    ],
+    onChange: (value) => controller.setAspect(value),
+  });
   const virtualCamera = createSwitchRow({
     title: "Virtual camera",
     checked: false,
@@ -223,7 +235,7 @@ export function createAdjustPanel(controller: Controller): { el: HTMLElement; de
       flash.el,
       flipCamera,
     ),
-    group("Output", virtualCamera.el, mirror.el),
+    group("Output", aspect.el, virtualCamera.el, mirror.el),
     group("Ring light", ringSwitch.el, ringBrightness.el, ringWarmth.el, ringThickness.el),
     group(
       "Stream",
@@ -239,12 +251,13 @@ export function createAdjustPanel(controller: Controller): { el: HTMLElement; de
   );
 
   function sync(state: Readonly<AppState>): void {
-    const { filter, outputMode, mirror: mirrored, ringLight, ringLightVisible } = state.studio;
+    const { filter, outputMode, mirror: mirrored, aspect: feedAspect, ringLight, ringLightVisible } = state.studio;
     lookName.textContent = `Look · ${presetName(filter.preset)}`;
     strength.set(filter.strength);
     temperature.set(filter.temperature);
     saturation.set(filter.saturation);
     contrast.set(filter.contrast);
+    aspect.set(feedAspect);
 
     const { camera } = state;
     zoom.set(camera.zoom);

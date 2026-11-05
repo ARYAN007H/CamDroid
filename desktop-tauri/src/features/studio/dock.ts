@@ -32,6 +32,20 @@ export function createDock(controller: Controller): { el: HTMLElement; destroy()
         pressed: (s) => s.studio.mirror,
       },
       {
+        label: "Rotate left",
+        shortcut: "Z",
+        icon: "rotateLeft",
+        action: () => controller.rotateFeed(-1),
+        pressed: (s) => s.studio.rotation !== 0,
+      },
+      {
+        label: "Rotate right",
+        shortcut: "X",
+        icon: "rotateRight",
+        action: () => controller.rotateFeed(1),
+        pressed: (s) => s.studio.rotation !== 0,
+      },
+      {
         label: "Ring light",
         shortcut: "R",
         icon: "sun",

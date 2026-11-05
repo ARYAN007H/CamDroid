@@ -1,4 +1,5 @@
 import { h } from "../../core/dom";
+import { computeFeedTransform } from "./feed-geometry";
 import type { Controller } from "../shared/controller";
 
 const NO_PICTURE_HINT_MS = 6000;
@@ -28,11 +29,27 @@ export function createViewfinder(controller: Controller): { el: HTMLElement; sta
       latest = null;
       try {
         const bitmap = await createImageBitmap(new Blob([buffer], { type: "image/jpeg" }));
-        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
+        // The stage rotation/crop is baked into the bitmap so the existing
+        // `object-fit: contain` letterboxes every combination for free.
+        const studio = controller.store.get().studio;
+        const t = computeFeedTransform(
+          bitmap.width,
+          bitmap.height,
+          studio.aspect ?? "source",
+          (studio.rotation ?? 0) as Parameters<typeof computeFeedTransform>[3],
+        );
+        if (canvas.width !== t.width || canvas.height !== t.height) {
+          canvas.width = t.width;
+          canvas.height = t.height;
         }
-        context?.drawImage(bitmap, 0, 0);
+        if (context) {
+          context.setTransform(1, 0, 0, 1, 0, 0);
+          context.clearRect(0, 0, t.width, t.height);
+          context.translate(t.width / 2, t.height / 2);
+          context.rotate((t.rotation * Math.PI) / 180);
+          context.drawImage(bitmap, t.sx, t.sy, t.sw, t.sh, -t.sw / 2, -t.sh / 2, t.sw, t.sh);
+          context.setTransform(1, 0, 0, 1, 0, 0);
+        }
         bitmap.close();
         if (!gotFrame) {
           gotFrame = true;

@@ -21,6 +21,7 @@ export const tauriApi: Api = {
   setFilter: (filter) => invoke("set_filter", { filter }),
   setOutputMode: (mode) => invoke("set_output_mode", { mode }),
   setMirror: (enabled) => invoke("set_mirror", { enabled }),
+  setFeedTransform: (rotation, aspect) => invoke("set_feed_transform", { rotation, aspect }),
   setRingLight: (settings) => invoke("set_ring_light", { settings }),
   setRingLightVisible: (visible) => invoke("set_ring_light_visible", { visible }),
 
