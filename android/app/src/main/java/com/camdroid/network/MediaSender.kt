@@ -11,8 +11,10 @@ import kotlin.concurrent.thread
 class MediaSender(
     private val sessionId: Long,
     private val writeMedia: (ProtocolV2.Packet) -> Unit,
-    private val videoCapacity: Int = 3,
+    private val videoCapacity: Int = 30,
     private val audioCapacity: Int = 16,
+    /** Called after a queued video frame was shed, so the encoder can emit a key frame. */
+    private val onVideoDrop: () -> Unit = {},
 ) {
     data class Stats(
         val queuedVideoFrames: Int,
@@ -39,7 +41,11 @@ class MediaSender(
     private val audioQueue = ArrayDeque<Frame>()
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null
-    private var nextSequence = 0L
+    // Per-kind sequence spaces: the receiver's video gate requires *video*
+    // sequences to be contiguous, so audio must never consume video numbers.
+    private var nextVideoSequence = 0L
+    private var nextAudioSequence = 0L
+    private var pendingDiscontinuity = false
     private var droppedVideo = 0L
     private var droppedAudio = 0L
     private var sentVideo = 0L
@@ -77,7 +83,7 @@ class MediaSender(
             flags = (if (isConfig) ProtocolV2.Flags.CONFIGURATION else 0) or
                 (if (isKeyFrame) ProtocolV2.Flags.KEY_FRAME else 0) or
                 (if (discontinuity) ProtocolV2.Flags.DISCONTINUITY else 0),
-            sequence = nextSequence(),
+            sequence = nextVideoSequence(),
             captureTimestampNs = captureTimestampNs,
             payload = payload.copyOf(),
         ),
@@ -90,7 +96,7 @@ class MediaSender(
         Frame(
             kind = if (isConfig) ProtocolV2.MediaKind.AUDIO_CONFIG else ProtocolV2.MediaKind.AUDIO,
             flags = if (isConfig) ProtocolV2.Flags.CONFIGURATION else 0,
-            sequence = nextSequence(),
+            sequence = nextAudioSequence(),
             captureTimestampNs = captureTimestampNs,
             payload = payload.copyOf(),
         ),
@@ -101,26 +107,40 @@ class MediaSender(
         Stats(videoQueue.size, audioQueue.size, droppedVideo, droppedAudio, sentVideo, sentAudio, sentBytes)
     }
 
-    private fun nextSequence(): Long = synchronized(lock) { nextSequence++ }
+    private fun nextVideoSequence(): Long = synchronized(lock) { nextVideoSequence++ }
+    private fun nextAudioSequence(): Long = synchronized(lock) { nextAudioSequence++ }
 
     private fun offer(queue: ArrayDeque<Frame>, capacity: Int, frame: Frame, video: Boolean) {
+        var out = frame
+        var shedAFrame = false
+        var shedIncoming = false
         synchronized(lock) {
-            if (queue.size == capacity) {
+            // A shed frame leaves a hole in the sequence: the next unit that is
+            // actually sent carries DISCONTINUITY so the receiver's gate resyncs
+            // on the replacement key frame instead of stalling until the GOP ends.
+            if (video && pendingDiscontinuity) {
+                pendingDiscontinuity = false
+                out = frame.copy(flags = frame.flags or ProtocolV2.Flags.DISCONTINUITY)
+            }
+            if (queue.size >= capacity) {
+                shedAFrame = true
                 val stale = queue.firstOrNull { !it.priority }
                 if (stale != null) {
                     queue.remove(stale)
                     if (video) droppedVideo++ else droppedAudio++
-                } else if (!frame.priority) {
-                    if (video) droppedVideo++ else droppedAudio++
-                    return
                 } else {
+                    // Only priority frames are queued; shed the newcomer instead.
+                    shedIncoming = true
                     if (video) droppedVideo++ else droppedAudio++
-                    return
                 }
             }
-            queue.addLast(frame)
-            lock.notifyAll()
+            if (!shedIncoming) {
+                queue.addLast(out)
+                lock.notifyAll()
+            }
+            if (shedAFrame) pendingDiscontinuity = true
         }
+        if (shedAFrame) onVideoDrop()
     }
 
     private fun sendLoop() {

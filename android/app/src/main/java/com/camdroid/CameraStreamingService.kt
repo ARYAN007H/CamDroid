@@ -247,22 +247,39 @@ class CameraStreamingService : LifecycleService() {
         Log.i(TAG, "Server started on $ipAddress:$serverPort")
     }
 
+    /** Capabilities must be answerable before the streaming camera exists. */
+    private fun cameraCapabilityQuery(): CameraManager = cameraManager ?: CameraManager(this)
+
     private suspend fun onClientConnected() {
         Log.i(TAG, "Client connected, waiting for stream negotiation...")
         StreamingController.isConnected.value = true
 
-        // Report only the active service mode until Task 7 replaces these
-        // values with runtime Camera2/MediaCodec capability discovery.
+        // Task 7 (lite): report what the active camera actually supports rather
+        // than the configured wish. The AE range list is Camera2's fps truth;
+        // the stream configuration map is the truth for output sizes.
+        val advertisedPreset = when {
+            useFrontCamera && currentConfig.resolution == ResolutionPreset.QHD -> {
+                // Budget front sensors render QHD by upscaling, which the
+                // encoder cannot sustain (measured 10-13 fps). Cap at FHD.
+                ResolutionPreset.FHD
+            }
+            cameraCapabilityQuery().supportsResolution(useFrontCamera, currentConfig.resolution) == false ->
+                ResolutionPreset.FHD
+            else -> currentConfig.resolution
+        }
+        val maxFps = cameraCapabilityQuery().queryMaxFps(useFrontCamera, advertisedPreset)
         val mode = JsonObject().apply {
-            addProperty("width", currentConfig.resolution.width)
-            addProperty("height", currentConfig.resolution.height)
-            addProperty("fps", currentConfig.fps)
+            addProperty("width", advertisedPreset.width)
+            addProperty("height", advertisedPreset.height)
+            addProperty("fps", maxFps)
             addProperty("min_bitrate_bps", 1_000_000L)
             addProperty("max_bitrate_bps", 50_000_000L)
         }
         val capabilityData = JsonObject().apply {
             add("protocol_versions", gson.toJsonTree(listOf(2)))
-            add("codecs", gson.toJsonTree(listOf(currentConfig.codec.name.lowercase())))
+            // Advertise every codec the encoder stack supports: the client's
+            // codec wish is adopted on start, not snapped to the phone's UI.
+            add("codecs", gson.toJsonTree(listOf("h264", "h265")))
             add("video_modes", gson.toJsonTree(listOf(mode)))
             add("audio_codecs", gson.toJsonTree(if (audioEnabled) listOf("aac") else emptyList<String>()))
         }
@@ -275,9 +292,25 @@ class CameraStreamingService : LifecycleService() {
     }
 
     private suspend fun startAcceptedStream() {
-        if (videoEncoder != null) return
+        // A new negotiated start must always reconfigure: a live encoder from
+        // a previous session would otherwise keep streaming its old config
+        // (fps/codec/resolution) and the new settings would be ignored.
+        if (videoEncoder != null) {
+            Log.i(TAG, "Restarting media pipeline for newly negotiated stream")
+            cameraManager?.close()
+            videoEncoder?.stop()
+            audioEncoder?.stop()
+            mediaSender?.stop()
+            videoEncoder = null
+            audioEncoder = null
+            mediaSender = null
+        }
         mediaSender = MediaSender(activeSessionId, writeMedia = { packet ->
             streamServer?.sendV2Packet(packet)
+        }, onVideoDrop = {
+            // The sender shed a frame: the receiver's gate will now wait for a
+            // key frame, so produce one immediately instead of at the next GOP.
+            videoEncoder?.requestKeyFrame()
         }).also { it.start() }
 
         // Start video encoder
@@ -319,7 +352,7 @@ class CameraStreamingService : LifecycleService() {
 
         cameraManager = CameraManager(this).apply {
             initialize()
-            openCamera(previewSurf, encoderSurface, useFrontCamera, currentConfig.fps)
+            openCamera(previewSurf, encoderSurface, useFrontCamera, currentConfig.fps, currentConfig.resolution)
             
             // Sync camera limits to controller
             StreamingController.maxZoom.value = maxZoom
@@ -420,9 +453,23 @@ class CameraStreamingService : LifecycleService() {
                 val fps = config.get("fps")?.asInt
                 val bitrate = config.get("bitrate_bps")?.asInt
                 val audio = request.get("audio_enabled")?.asBoolean ?: false
+                // The advertised capability is the truth: the phone's local UI
+                // config may wish for a mode the sensor does not offer. Validate
+                // against the camera's real capability, then adopt the request
+                // so the encoder and camera are configured exactly as negotiated.
+                val requestedPreset = ResolutionPreset.entries.firstOrNull {
+                    it.width == width && it.height == height
+                }
+                val requestedCodecType = requestedCodec?.let { name ->
+                    com.camdroid.encoder.VideoCodecType.entries.firstOrNull {
+                        it.name.lowercase() == name
+                    }
+                }
                 val error = when {
-                    requestedCodec != currentConfig.codec.name.lowercase() -> "Requested codec is unavailable"
-                    width != currentConfig.resolution.width || height != currentConfig.resolution.height || fps != currentConfig.fps -> "Requested video mode is unavailable"
+                    requestedCodecType == null -> "Requested codec is unavailable"
+                    requestedPreset == null || fps == null ||
+                        fps > cameraCapabilityQuery().queryMaxFps(useFrontCamera, requestedPreset) ->
+                        "Requested video mode is unavailable"
                     bitrate == null || bitrate !in 1_000_000..50_000_000 -> "Requested bitrate is unavailable"
                     audio && !audioEnabled -> "Audio is unavailable"
                     else -> null
@@ -431,7 +478,12 @@ class CameraStreamingService : LifecycleService() {
                     sendStreamRejected(error)
                     return
                 }
-                currentConfig = currentConfig.copy(bitrate = checkNotNull(bitrate))
+                currentConfig = currentConfig.copy(
+                    codec = checkNotNull(requestedCodecType),
+                    resolution = checkNotNull(requestedPreset),
+                    fps = checkNotNull(fps),
+                    bitrate = checkNotNull(bitrate),
+                )
                 activeSessionId = nextSessionId.getAndIncrement()
                 val accepted = JsonObject().apply {
                     addProperty("session_id", activeSessionId)
