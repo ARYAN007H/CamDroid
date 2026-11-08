@@ -15,6 +15,7 @@ use crate::video::effects::{mirror_yuyv, EffectEngine};
 use crate::video::filters::{ColorLut, FilterController, FilterSettings};
 use crate::video::output::{OutputController, OutputMode};
 use crate::video::preview::{decimate_yuyv, yuyv_to_rgb, PreviewGeometry, PreviewHub};
+#[cfg(target_os = "linux")]
 use crate::video::v4l2_output::V4l2Sink;
 use anyhow::{Context, Result};
 use crossbeam_channel::Receiver;
@@ -116,6 +117,7 @@ struct Renderer {
     geometry: PreviewGeometry,
     effects: EffectEngine,
     lut: Option<(FilterSettings, ColorLut)>,
+    #[cfg(target_os = "linux")]
     sink: Option<V4l2Sink>,
     sink_retry_at: Option<Instant>,
     sink_open_attempts: u32,
@@ -135,6 +137,7 @@ impl Renderer {
             geometry,
             effects: EffectEngine::default(),
             lut: None,
+            #[cfg(target_os = "linux")]
             sink: None,
             sink_retry_at: None,
             sink_open_attempts: 0,
@@ -203,6 +206,7 @@ impl Renderer {
 
     /// Returns true when a writable virtual camera is available, opening it if
     /// needed. Failed opens are reported through telemetry and retried slowly.
+    #[cfg(target_os = "linux")]
     fn ensure_sink(&mut self, now: Instant) -> bool {
         if self.sink.is_some() {
             return true;
@@ -236,7 +240,27 @@ impl Renderer {
         }
     }
 
+    /// Windows and macOS have no v4l2loopback device. Report that once per
+    /// retry window and keep the in-app preview running.
+    #[cfg(not(target_os = "linux"))]
+    fn ensure_sink(&mut self, now: Instant) -> bool {
+        if self.sink_retry_at.is_some_and(|retry_at| now < retry_at) {
+            return false;
+        }
+
+        self.sink_open_attempts += 1;
+        self.sink_retry_at = Some(now + SINK_RETRY_INTERVAL);
+        self.targets
+            .telemetry
+            .set_virtual_camera(VirtualCameraStatus::Failed(
+                "Virtual camera output requires Linux with v4l2loopback; the in-app preview still works."
+                    .to_string(),
+            ));
+        false
+    }
+
     fn release_sink(&mut self) {
+        #[cfg(target_os = "linux")]
         if self.sink.take().is_some() {
             info!("Virtual camera released");
         }
@@ -246,6 +270,7 @@ impl Renderer {
             .set_virtual_camera(VirtualCameraStatus::Inactive);
     }
 
+    #[cfg(target_os = "linux")]
     fn write_to_sink(&mut self, frame: &[u8], now: Instant) {
         let Some(sink) = self.sink.as_mut() else {
             return;
@@ -262,6 +287,9 @@ impl Renderer {
                 )));
         }
     }
+
+    #[cfg(not(target_os = "linux"))]
+    fn write_to_sink(&mut self, _frame: &[u8], _now: Instant) {}
 
     fn grade_full_frame(&mut self, settings: &FilterSettings, frame: &mut [u8]) {
         if let Some((_, lut)) = &self.lut {

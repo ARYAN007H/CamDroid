@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.camdroid.desktop</id>
+  <name>CamDroid Studio</name>
+  <summary>Use your Android phone as a webcam</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      CamDroid Studio turns an Android phone into a high-quality webcam and
+      microphone for your desktop. It discovers the phone over Wi-Fi or USB,
+      decodes the hardware H.264/H.265 stream, and publishes it through
+      v4l2loopback and PulseAudio on Linux.
+    </p>
+    <p>
+      On Windows and macOS the app runs as a standalone preview and camera
+      controller, since those platforms do not provide v4l2loopback.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.camdroid.desktop.desktop</launchable>
+  <url type="homepage">https://github.com/ARYAN007H/CamDroid</url>
+  <developer_name>CamDroid</developer_name>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="2.1.0" date="2026-11-05"/>
+  </releases>
+</component>

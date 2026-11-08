@@ -273,7 +273,9 @@ export function createAdjustPanel(controller: Controller): { el: HTMLElement; de
     virtualCamera.set(outputMode === "virtual_camera");
     mirror.set(mirrored);
     const status = state.session?.telemetry.virtualCamera;
-    if (outputMode !== "virtual_camera") {
+    if (!state.system.virtualCameraSupported) {
+      virtualCamera.setHint("Preview-only build: virtual camera output requires Linux.");
+    } else if (outputMode !== "virtual_camera") {
       virtualCamera.setHint("Show up as a webcam in OBS, Zoom and browsers.");
     } else if (status?.state === "failed") {
       virtualCamera.setHint(firstLine(status.detail), true);

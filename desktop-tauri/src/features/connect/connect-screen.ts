@@ -398,10 +398,13 @@ export function createConnectScreen(controller: Controller): Screen {
     renderQuality();
 
     const { system } = state;
-    readinessDot.className = `dot ${system.virtualCameraReady ? "ok" : "warn"}`;
-    readinessText.textContent = system.virtualCameraReady
-      ? `Virtual camera ready (${system.virtualCameraDevice})`
-      : "Virtual camera not set up. Run desktop/setup.sh";
+    const cameraReady = system.virtualCameraSupported && system.virtualCameraReady;
+    readinessDot.className = `dot ${cameraReady ? "ok" : "warn"}`;
+    readinessText.textContent = !system.virtualCameraSupported
+      ? "Preview-only build: the virtual camera is available on Linux."
+      : system.virtualCameraReady
+        ? `Virtual camera ready (${system.virtualCameraDevice})`
+        : "Virtual camera not set up. Run desktop/setup.sh";
 
     usbButton.disabled = !system.adbAvailable;
     usbNote.hidden = system.adbAvailable;

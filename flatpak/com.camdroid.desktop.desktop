@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=CamDroid Studio
+GenericName=Webcam
+Comment=Use your Android phone as a webcam
+Exec=camdroid-studio
+Icon=com.camdroid.desktop
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;
+Keywords=camera;webcam;phone;android;
+StartupNotify=true
+StartupWMClass=camdroid-gui

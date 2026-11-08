@@ -89,7 +89,12 @@ export function createMockPlatform(): Platform {
   const api: Api = {
     getStudioState: async () => structuredClone(studio),
     filterPresets: async () => structuredClone(PRESETS),
-    systemCheck: async () => ({ adbAvailable: true, virtualCameraDevice: "/dev/video10", virtualCameraReady: true }),
+    systemCheck: async () => ({
+      adbAvailable: true,
+      virtualCameraDevice: "/dev/video10",
+      virtualCameraReady: true,
+      virtualCameraSupported: true,
+    }),
     discoverDevices: async () => {
       await delay(900);
       return [

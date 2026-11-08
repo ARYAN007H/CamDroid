@@ -1,0 +1,69 @@
+# CamDroid Studio Flatpak manifest.
+#
+# The frontend is embedded by tauri-build, and Node is not part of the GNOME
+# SDK, so build it on the host first:
+#   (cd desktop-tauri && npm ci && npm run build)
+# Then:
+#   flatpak-builder --user --install-deps-from=flathub --force-clean \
+#     --repo=flatpak-repo flatpak-build flatpak/com.camdroid.desktop.yml
+#   flatpak build-bundle flatpak-repo CamDroid.flatpak com.camdroid.desktop
+app-id: com.camdroid.desktop
+runtime: org.gnome.Platform
+runtime-version: "51"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm22
+command: camdroid-studio
+
+finish-args:
+  # mDNS discovery and the TCP video stream.
+  - --share=network
+  - --share=ipc
+  # Tauri/WebKitGTK windowing.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Virtual microphone (PulseAudio/PipeWire-Pulse).
+  - --socket=pulseaudio
+  # v4l2loopback virtual camera (/dev/video10) and USB devices.
+  - --device=all
+  - --talk-name=org.freedesktop.portal.Desktop
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
+  env:
+    CARGO_HOME: /run/build/camdroid-studio/.cargo
+    LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
+
+modules:
+  - name: camdroid-studio
+    buildsystem: simple
+    build-options:
+      # Cargo fetches the crate graph from crates.io. Flathub's buildbot
+      # requires vendored sources; for CI and local builds this is simpler.
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release --manifest-path desktop-tauri/src-tauri/Cargo.toml
+      - install -Dm755 desktop-tauri/src-tauri/target/release/camdroid-gui /app/bin/camdroid-studio
+      - install -Dm644 flatpak/com.camdroid.desktop.desktop /app/share/applications/com.camdroid.desktop.desktop
+      - install -Dm644 flatpak/com.camdroid.desktop.metainfo.xml /app/share/metainfo/com.camdroid.desktop.metainfo.xml
+      - install -Dm644 desktop-tauri/src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/com.camdroid.desktop.png
+      - install -Dm644 desktop-tauri/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/com.camdroid.desktop.png
+      - install -Dm644 desktop-tauri/src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/com.camdroid.desktop.png
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .github
+          - .worktrees
+          - android
+          - website
+          - target
+          - desktop/target
+          - desktop-tauri/node_modules
+          - desktop-tauri/src-tauri/target
+          - flatpak-build
+          - flatpak-repo

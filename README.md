@@ -235,14 +235,24 @@ the picture snaps clean. (Studio's sender-side shedding usually beats you to it.
 Pushing a tag runs the [release pipeline](.github/workflows/release.yml):
 
 ```
-tag v*  ──►  📱 Android APK (ubuntu)      ──┐
-         └─►  🎛️ deb + rpm (Arch container) ─┴─►  GitHub release with artifacts
+tag v*  ──►  📱 Android APK (ubuntu)                ──┐
+         ├─►  🐧 AppImage + deb + rpm (Arch)         │
+         ├─►  📦 Flatpak bundle (GNOME 51)           ├─►  GitHub release
+         ├─►  🪟 MSI + NSIS setup (Windows x64)      │    with all artifacts
+         └─►  🍎 DMG (macOS arm64 + Intel)           ─┘
 ```
 
-The desktop job builds inside an **Arch Linux container** so the FFmpeg 9 +
+The Linux job builds inside an **Arch Linux container** so the FFmpeg 9 +
 webkit2gtk stack matches the environment the releases are verified on — Ubuntu's
-older FFmpeg would break the core. Manual dispatches run the build jobs alone
-as a smoke test.
+older FFmpeg would break the core. The Flatpak uses the GNOME 51 runtime, which
+already ships a compatible WebKitGTK and FFmpeg.
+
+Windows and macOS installers statically link FFmpeg so they are self-contained.
+Those builds run as standalone preview and camera controllers: the virtual
+camera (v4l2loopback) and virtual microphone (PulseAudio) are Linux features.
+
+Manual dispatches run the build jobs alone as a smoke test; set `publish` to
+also attach the results to an existing release tag.
 
 ---
 

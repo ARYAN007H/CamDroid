@@ -74,7 +74,13 @@ impl Default for SessionConfig {
             resolution: "1080p".to_string(),
             fps: 60,
             audio: true,
-            output: OutputMode::VirtualCamera,
+            // The virtual camera is a Linux feature; elsewhere the app opens
+            // in preview-only mode so it is still useful out of the box.
+            output: if cfg!(target_os = "linux") {
+                OutputMode::VirtualCamera
+            } else {
+                OutputMode::Standalone
+            },
             device_name: None,
             v4l2_device: "/dev/video10".to_string(),
             audio_device: "CamDroid".to_string(),
@@ -139,6 +145,7 @@ pub struct CamdroidSession {
     telemetry: Telemetry,
     threads: Mutex<Vec<JoinHandle<()>>>,
     _adb_guard: Option<connection::AdbForward>,
+    #[cfg(target_os = "linux")]
     _pulse_output: Option<audio::PulseOutput>,
 }
 
@@ -306,6 +313,7 @@ impl CamdroidSession {
             shutdown.clone(),
         )?);
 
+        #[cfg(target_os = "linux")]
         let pulse_output = if stream.audio_enabled {
             match start_audio(
                 &config.audio_device,
@@ -329,6 +337,16 @@ impl CamdroidSession {
             None
         };
 
+        // Windows and macOS have no PulseAudio virtual microphone. Keep the
+        // video pipeline running and tell the UI why audio is absent.
+        #[cfg(not(target_os = "linux"))]
+        if stream.audio_enabled {
+            warn!("Audio output requires Linux/PulseAudio; streaming video only");
+            telemetry.set_audio_error(
+                "Audio output requires Linux with PulseAudio.".to_string(),
+            );
+        }
+
         abort.armed = false;
         Ok(Self {
             writer,
@@ -342,6 +360,7 @@ impl CamdroidSession {
             telemetry,
             threads: Mutex::new(threads),
             _adb_guard: adb_guard,
+            #[cfg(target_os = "linux")]
             _pulse_output: pulse_output,
         })
     }
@@ -494,6 +513,7 @@ fn resolve_transport(
 }
 
 /// Creates the virtual microphone and the threads that feed it.
+#[cfg(target_os = "linux")]
 fn start_audio(
     sink_name: &str,
     audio_config_rx: crossbeam_channel::Receiver<Vec<u8>>,

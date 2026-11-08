@@ -1,17 +1,35 @@
 name: Release
 
-# Builds the release artifacts the way the v2.1.0 release was built by hand:
-# an Android transmitter APK and CamDroid Studio bundles for Debian/Fedora.
-# Pushing a tag like `v2.1.1` builds and attaches them to a GitHub release;
-# dispatching manually just runs the build jobs as a smoke test.
+# Builds CamDroid release artifacts:
+#   - Android transmitter APK
+#   - CamDroid Studio AppImage / deb / rpm (Arch container, matching FFmpeg 9)
+#   - CamDroid Studio Flatpak bundle (GNOME 51 runtime)
+#   - CamDroid Studio MSI / NSIS installers (Windows x64)
+#   - CamDroid Studio DMGs (macOS arm64 + Intel)
+#
+# Pushing a tag like `v2.1.1` builds everything and attaches it to that
+# release. Manual dispatch builds everything and, when `publish` is checked,
+# attaches the artifacts to an existing release tag.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to attach artifacts to"
+        required: false
+        default: "v2.1.0"
+      publish:
+        description: "Attach the built artifacts to the release"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 jobs:
   android:
@@ -31,7 +49,7 @@ jobs:
 
       - name: Name the APK after the release
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           cp android/app/build/outputs/apk/debug/app-debug.apk \
              "CamDroid-${VERSION}-android.apk"
 
@@ -41,20 +59,23 @@ jobs:
           path: CamDroid-*-android.apk
           if-no-files-found: error
 
-  desktop:
-    name: Desktop bundles (deb/rpm)
-    # The desktop core links FFmpeg 9 and the Tauri stack; an Arch container
-    # reproduces the environment the releases were verified on (rolling
-    # FFmpeg), instead of chasing the older FFmpeg in Ubuntu images.
+  linux:
+    name: Linux bundles (AppImage/deb/rpm)
+    # The desktop core links the distro FFmpeg and the Tauri stack; an Arch
+    # container reproduces the environment the releases are verified on
+    # (rolling FFmpeg), instead of chasing the older FFmpeg in Ubuntu images.
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm \
             git rust nodejs npm ffmpeg pkgconf file clang \
-            webkit2gtk-4.1 libappindicator-gtk3 librsvg openssl
+            webkit2gtk-4.1 libappindicator-gtk3 librsvg openssl \
+            fuse2 patchelf
 
       - uses: actions/checkout@v4
 
@@ -62,28 +83,165 @@ jobs:
         working-directory: desktop-tauri
         run: |
           npm ci
-          npm run tauri build
+          npm run tauri build -- --bundles appimage,deb,rpm
 
       - name: Collect bundles
         working-directory: desktop-tauri
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           mkdir -p out
-          cp src-tauri/target/release/bundle/deb/CamDroid_${VERSION}_amd64.deb \
-             out/ 2>/dev/null || cp src-tauri/target/release/bundle/deb/*.deb out/
-          cp src-tauri/target/release/bundle/rpm/CamDroid-${VERSION}-1.x86_64.rpm \
-             out/ 2>/dev/null || cp src-tauri/target/release/bundle/rpm/*.rpm out/
+          cp src-tauri/target/release/bundle/appimage/*.AppImage \
+             "out/CamDroid_${VERSION}_amd64.AppImage"
+          cp src-tauri/target/release/bundle/deb/*.deb \
+             "out/CamDroid_${VERSION}_amd64.deb"
+          cp src-tauri/target/release/bundle/rpm/*.rpm \
+             "out/CamDroid-${VERSION}-1.x86_64.rpm"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-bundles
+          name: linux-bundles
+          path: desktop-tauri/out/*
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build frontend for bundling
+        working-directory: desktop-tauri
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stamp the release version into AppStream metadata
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          sed -i "s/version=\"2\.1\.0\"/version=\"${VERSION}\"/; s/date=\"[0-9-]*\"/date=\"$(date +%F)\"/" \
+            flatpak/com.camdroid.desktop.metainfo.xml
+
+      - name: Build Flatpak
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          flatpak-builder --user --disable-rofiles-fuse --install-deps-from=flathub --force-clean \
+            --default-branch=stable \
+            --repo=flatpak-repo flatpak-build flatpak/com.camdroid.desktop.yml
+          flatpak build-bundle \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            flatpak-repo "CamDroid-${VERSION}.flatpak" com.camdroid.desktop stable
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-bundle
+          path: CamDroid-*.flatpak
+          if-no-files-found: error
+
+  windows:
+    name: Windows installers
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM, NASM and make
+        run: |
+          choco install -y llvm nasm make
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build installers
+        working-directory: desktop-tauri
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          npm ci
+          npm run tauri build -- --bundles msi,nsis
+
+      - name: Collect installers
+        working-directory: desktop-tauri
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item src-tauri/target/release/bundle/msi/*.msi "out/CamDroid-${version}-windows-x64.msi"
+          Copy-Item src-tauri/target/release/bundle/nsis/*.exe "out/CamDroid-${version}-windows-x64-setup.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: desktop-tauri/out/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS DMG (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install NASM
+        run: brew install nasm
+
+      - name: Build DMG
+        working-directory: desktop-tauri
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          npm ci
+          npm run tauri build -- --bundles dmg
+
+      - name: Collect DMG
+        working-directory: desktop-tauri
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          mkdir -p out
+          cp src-tauri/target/release/bundle/dmg/*.dmg \
+             "out/CamDroid-${VERSION}-macos-${{ matrix.arch }}.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
           path: desktop-tauri/out/*
           if-no-files-found: error
 
   release:
     name: Attach artifacts to the release
-    needs: [android, desktop]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, linux, flatpak, windows, macos]
+    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -93,5 +251,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: dist/*
-          generate_release_notes: true
+          overwrite_files: true
+          fail_on_unmatched_files: true

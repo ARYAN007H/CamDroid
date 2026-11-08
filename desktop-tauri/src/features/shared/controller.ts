@@ -242,6 +242,10 @@ export class Controller {
 
   async toggleVirtualCamera(): Promise<void> {
     const { studio, system } = this.store.get();
+    if (!system.virtualCameraSupported) {
+      this.toast.show("Virtual camera output is only available on Linux.", "error");
+      return;
+    }
     const outputMode = studio.outputMode === "virtual_camera" ? "standalone" : "virtual_camera";
     this.store.set({ studio: { ...studio, outputMode } });
     await this.guard(this.api.setOutputMode(outputMode));

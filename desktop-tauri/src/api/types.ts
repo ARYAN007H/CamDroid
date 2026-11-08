@@ -134,4 +134,5 @@ export interface SystemCheck {
   adbAvailable: boolean;
   virtualCameraDevice: string;
   virtualCameraReady: boolean;
+  virtualCameraSupported: boolean;
 }
