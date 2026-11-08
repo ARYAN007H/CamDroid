@@ -53,7 +53,7 @@ jobs:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm \
-            git rust nodejs npm ffmpeg pkgconf file \
+            git rust nodejs npm ffmpeg pkgconf file clang \
             webkit2gtk-4.1 libappindicator-gtk3 librsvg openssl
 
       - uses: actions/checkout@v4
