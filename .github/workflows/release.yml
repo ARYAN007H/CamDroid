@@ -170,6 +170,7 @@ jobs:
       # combined with Git Bash mangles the backslashes in FFmpeg's MSVC
       # dependency command (gsub(/\\/, "/")), so use the MSYS2 toolchain.
       - name: Set up MSYS2 build tools
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MSYS
@@ -185,6 +186,12 @@ jobs:
         env:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: |
+          # The setup-msys2 action only adds its wrapper to PATH, so put the
+          # real MSYS2 tools first (after cl.exe's directory, so Rust keeps
+          # linking with MSVC's link.exe instead of MSYS2's coreutils link).
+          $cl = (Get-Command cl.exe).Source
+          $env:PATH = "$(Split-Path $cl);${{ steps.msys2.outputs.msys2-location }}\usr\bin;$env:PATH"
+          Get-Command make, sh, awk, link.exe | ForEach-Object { Write-Host $_.Source }
           npm ci
           npm run tauri build -- --bundles msi,nsis
 
