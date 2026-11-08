@@ -106,6 +106,10 @@ fun ViewfinderScreen(
                     TextureView(ctx).apply {
                         surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                             override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                // Fixed 16:9 buffer: matches the stream aspect so the
+                                // viewfinder never stretches, and 1280x720 is a legal
+                                // constrained-high-speed size for the 60 fps session.
+                                st.setDefaultBufferSize(1280, 720)
                                 StreamingController.activePreviewSurface = Surface(st)
                             }
                             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
@@ -118,7 +122,8 @@ fun ViewfinderScreen(
                     }
                 },
                 modifier = Modifier
-                    .fillMaxSize()
+                    .align(Alignment.Center)
+                    .aspectRatio(16f / 9f)
                     .pointerInput(Unit) {
                         detectTransformGestures { _, _, zoom, _ ->
                             val newZoom = (currentZoom * zoom).coerceIn(1f, maxZoom)

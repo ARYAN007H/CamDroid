@@ -138,13 +138,17 @@ class AudioEncoder(
             val outputBuffer = encoder.getOutputBuffer(outputIndex) ?: continue
 
             try {
+                val encoded = outputBuffer.duplicate().apply {
+                    position(bufferInfo.offset)
+                    limit(bufferInfo.offset + bufferInfo.size)
+                }
                 if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                     val configData = ByteArray(bufferInfo.size)
-                    outputBuffer.get(configData)
+                    encoded.get(configData)
                     onEncodedAudio(configData, true, bufferInfo.presentationTimeUs)
                 } else if (bufferInfo.size > 0) {
                     val aacData = ByteArray(bufferInfo.size)
-                    outputBuffer.get(aacData)
+                    encoded.get(aacData)
                     // Wrap with ADTS header for raw streaming
                     val adtsFrame = addAdtsHeader(aacData)
                     onEncodedAudio(adtsFrame, false, bufferInfo.presentationTimeUs)

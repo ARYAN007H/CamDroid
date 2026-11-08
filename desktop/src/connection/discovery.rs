@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Information about a discovered CamDroid device on the network.
 #[derive(Debug, Clone)]
@@ -41,26 +41,15 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
         .context("Failed to start mDNS browsing")?;
 
     let mut devices = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
-    let mut first_found_at: Option<std::time::Instant> = None;
+    // A fixed deadline: the search must end on time however chatty the network is.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
-    loop {
-        let now = std::time::Instant::now();
-        if now >= deadline {
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(event) = receiver.recv_timeout(remaining) else {
             break;
-        }
-        // Recommendation #5: Once at least one CamDroid phone is resolved on the LAN,
-        // wait only 250ms more for any secondary devices instead of blocking the UI
-        // for the entire 5-second timeout.
-        if let Some(found_time) = first_found_at {
-            if now.duration_since(found_time) >= Duration::from_millis(250) {
-                break;
-            }
-        }
-
-        let poll_wait = Duration::from_millis(100).min(deadline.saturating_duration_since(now));
-        match receiver.recv_timeout(poll_wait) {
-            Ok(event) => match event {
+        };
+        {
+            match event {
                 mdns_sd::ServiceEvent::ServiceResolved(info) => {
                     let name = info.get_fullname().to_string();
                     let port = info.get_port();
@@ -84,11 +73,10 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                         .map(|v| v.val_str().to_string())
                         .unwrap_or_else(|| "Unknown".to_string());
 
-                    for addr in info.get_addresses() {
-                        info!(
-                            "Found: {} at {}:{} ({})",
-                            name, addr, port, device_model
-                        );
+                    // IPv6 link-local addresses need a scope id and cannot be
+                    // used as plain `ip:port`, so only IPv4 is offered.
+                    for addr in info.get_addresses().iter().filter(|addr| addr.is_ipv4()) {
+                        info!("Found: {} at {}:{} ({})", name, addr, port, device_model);
                         devices.push(DiscoveredDevice {
                             name: name.clone(),
                             ip: *addr,
@@ -98,9 +86,6 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                             resolution: resolution.clone(),
                             device_model: device_model.clone(),
                         });
-                    }
-                    if first_found_at.is_none() && !devices.is_empty() {
-                        first_found_at = Some(std::time::Instant::now());
                     }
                 }
                 mdns_sd::ServiceEvent::SearchStarted(_) => {
@@ -115,9 +100,7 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                 mdns_sd::ServiceEvent::SearchStopped(_) => {
                     debug!("mDNS search stopped");
                 }
-            },
-            Err(mdns_sd::flume::RecvTimeoutError::Timeout) => continue,
-            Err(_) => break,
+            }
         }
     }
 
@@ -126,6 +109,7 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
     }
 
     devices.sort_by(|a, b| a.name.cmp(&b.name));
+    devices.dedup_by(|a, b| a.ip == b.ip && a.port == b.port);
 
     if devices.is_empty() {
         info!("No CamDroid devices found on the network");

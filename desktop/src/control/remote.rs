@@ -43,6 +43,9 @@ fn control_loop(writer: Arc<WriterHandle>, shutdown: Arc<AtomicBool>) -> Result<
     // Print help on start
     print_help();
 
+    // The phone only understands absolute states, so "mirror" toggles locally.
+    let mut mirrored = false;
+
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -72,7 +75,7 @@ fn control_loop(writer: Arc<WriterHandle>, shutdown: Arc<AtomicBool>) -> Result<
         }
 
         // Parse and execute the command
-        match parse_and_send(&line, &writer) {
+        match parse_and_send(&line, &writer, &mut mirrored) {
             Ok(should_quit) => {
                 if should_quit {
                     info!("Quit command received, shutting down...");
@@ -91,7 +94,7 @@ fn control_loop(writer: Arc<WriterHandle>, shutdown: Arc<AtomicBool>) -> Result<
 
 /// Parse a command string and send the corresponding control packet.
 /// Returns `Ok(true)` if the user wants to quit.
-fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
+fn parse_and_send(input: &str, writer: &WriterHandle, mirrored: &mut bool) -> Result<bool> {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(false);
@@ -132,26 +135,8 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
                         y: None,
                     }
                 }
-                "tap" => {
-                    let x = parts
-                        .get(2)
-                        .context("Usage: focus tap <x> <y> (0.0 to 1.0)")?
-                        .parse::<f32>()
-                        .context("Tap X must be a number between 0.0 and 1.0")?;
-                    let y = parts
-                        .get(3)
-                        .context("Usage: focus tap <x> <y> (0.0 to 1.0)")?
-                        .parse::<f32>()
-                        .context("Tap Y must be a number between 0.0 and 1.0")?;
-                    ControlCommand::SetFocus {
-                        mode: "tap".to_string(),
-                        distance: None,
-                        x: Some(x.clamp(0.0, 1.0)),
-                        y: Some(y.clamp(0.0, 1.0)),
-                    }
-                }
                 _ => {
-                    anyhow::bail!("Unknown focus mode: {}. Use 'auto', 'manual', or 'tap'", mode);
+                    anyhow::bail!("Unknown focus mode: {}. Use 'auto' or 'manual'", mode);
                 }
             }
         }
@@ -184,10 +169,7 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
         }
 
         "flash" => {
-            let state = parts
-                .get(1)
-                .context("Usage: flash on|off")?
-                .to_lowercase();
+            let state = parts.get(1).context("Usage: flash on|off")?.to_lowercase();
             let enabled = match state.as_str() {
                 "on" | "true" | "1" => true,
                 "off" | "false" | "0" => false,
@@ -197,8 +179,8 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
         }
 
         "mirror" | "flip" => {
-            // Toggle — we don't track state here, just send the command
-            ControlCommand::SetMirror { enabled: true }
+            *mirrored = !*mirrored;
+            ControlCommand::SetMirror { enabled: *mirrored }
         }
 
         "camera" | "switch" => ControlCommand::SwitchCamera,
@@ -209,9 +191,7 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
                 .context("Usage: resolution <1080p|1440p|4k>")?
                 .to_string();
             match value.as_str() {
-                "1080p" | "1440p" | "4k" | "2k" => {
-                    ControlCommand::SetResolution { value }
-                }
+                "1080p" | "1440p" | "4k" | "2k" => ControlCommand::SetResolution { value },
                 _ => anyhow::bail!("Unknown resolution: {}. Use: 1080p, 1440p, 4k", value),
             }
         }
@@ -234,9 +214,7 @@ fn parse_and_send(input: &str, writer: &WriterHandle) -> Result<bool> {
                 .context("Usage: codec <h264|h265|mjpeg>")?
                 .to_lowercase();
             match value.as_str() {
-                "h264" | "h265" | "hevc" | "mjpeg" => {
-                    ControlCommand::SetCodec { value }
-                }
+                "h264" | "h265" | "hevc" | "mjpeg" => ControlCommand::SetCodec { value },
                 _ => anyhow::bail!("Unknown codec: {}. Use: h264, h265, mjpeg", value),
             }
         }

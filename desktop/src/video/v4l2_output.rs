@@ -1,34 +1,33 @@
-// Cross-platform Virtual Camera Output (v4l2loopback on Linux, standalone/OS bridge on macOS & Windows).
+//! v4l2loopback virtual camera sink.
+//!
+//! Opens a v4l2loopback device (e.g. /dev/video10), sets its output format to
+//! YUYV422, and writes frames so they appear as a real webcam to other apps.
+//! Pacing, retries and filtering belong to the render stage; this type only
+//! owns the device handle.
 
 use anyhow::{Context, Result};
-use crossbeam_channel::Receiver;
-use log::{info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
-
-#[cfg(target_os = "linux")]
-use anyhow::bail;
-#[cfg(target_os = "linux")]
-use log::error;
-#[cfg(target_os = "linux")]
-use std::fs::OpenOptions;
-#[cfg(target_os = "linux")]
+use log::info;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
-#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
-#[cfg(target_os = "linux")]
+// ---------------------------------------------------------------------------
+// V4L2 constants and ioctl structures
+// ---------------------------------------------------------------------------
+
+/// V4L2_BUF_TYPE_VIDEO_OUTPUT = 2
 const V4L2_BUF_TYPE_VIDEO_OUTPUT: u32 = 2;
-#[cfg(target_os = "linux")]
+
+/// V4L2_PIX_FMT_YUYV (fourcc 'YUYV')
 const V4L2_PIX_FMT_YUYV: u32 = u32::from_le_bytes([b'Y', b'U', b'Y', b'V']);
-#[cfg(target_os = "linux")]
+
+/// V4L2_FIELD_NONE = 1
 const V4L2_FIELD_NONE: u32 = 1;
-#[cfg(target_os = "linux")]
+
+/// V4L2_COLORSPACE_SRGB = 8
 const V4L2_COLORSPACE_SRGB: u32 = 8;
 
-#[cfg(target_os = "linux")]
+/// The kernel's v4l2_pix_format struct (packed, no padding).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct V4l2PixFormat {
@@ -46,20 +45,24 @@ struct V4l2PixFormat {
     xfer_func: u32,
 }
 
-#[cfg(target_os = "linux")]
+/// The kernel's v4l2_format struct for single-planar formats.
+/// We use a raw byte union buffer to match the kernel ABI exactly.
 #[repr(C)]
 struct V4l2Format {
     type_: u32,
-    _padding_align: u32,
+    _padding_align: u32, // Align the union to 8 bytes on 64-bit platforms
     fmt: V4l2PixFormat,
+    // Padding to match the kernel's union size (200 bytes total for fmt).
     _padding: [u8; 200 - std::mem::size_of::<V4l2PixFormat>()],
 }
 
-#[cfg(target_os = "linux")]
+// VIDIOC_S_FMT = _IOWR('V', 5, struct v4l2_format)
 nix::ioctl_readwrite!(vidioc_s_fmt, b'V', 5, V4l2Format);
 
-#[cfg(target_os = "linux")]
-fn open_v4l2_device(device_path: &str, width: u32, height: u32) -> Result<std::fs::File> {
+/// Open a v4l2loopback device and configure it for YUYV output.
+///
+/// Returns a file handle ready for writing raw YUYV422 frame data.
+fn open_v4l2_device(device_path: &str, width: u32, height: u32) -> Result<File> {
     info!(
         "Opening v4l2loopback device: {} ({}x{} YUYV)",
         device_path, width, height
@@ -71,13 +74,16 @@ fn open_v4l2_device(device_path: &str, width: u32, height: u32) -> Result<std::f
         .open(device_path)
         .with_context(|| {
             format!(
-                "Failed to open {}. Load v4l2loopback with: sudo modprobe v4l2loopback exclusive_caps=1 video_nr=10 card_label=\"CamDroid\"",
+                "Failed to open {}. Make sure:\n\
+                 1. v4l2loopback is loaded: sudo modprobe v4l2loopback exclusive_caps=1 video_nr=10 card_label=\"CamDroid\"\n\
+                 2. You have write permission: sudo usermod -aG video $USER",
                 device_path
             )
         })?;
 
     let fd = file.as_raw_fd();
-    let bytesperline = width * 2;
+
+    let bytesperline = width * 2; // YUYV = 2 bytes per pixel
     let sizeimage = bytesperline * height;
 
     let mut fmt = V4l2Format {
@@ -109,137 +115,85 @@ fn open_v4l2_device(device_path: &str, width: u32, height: u32) -> Result<std::f
         })?;
     }
 
+    info!(
+        "v4l2loopback configured: {}x{} YUYV (sizeimage={})",
+        fmt.fmt.width, fmt.fmt.height, fmt.fmt.sizeimage
+    );
+
     Ok(file)
 }
 
-/// Spawn a thread that reads decoded YUYV422 frames from a channel
-/// and writes them to a virtual camera sink using PTS-aware pacing.
-pub fn spawn_v4l2_writer_thread(
-    device_path: String,
-    frame_rx: Receiver<crate::video::DecodedVideoFrame>,
-    width: u32,
-    height: u32,
-    target_fps: u32,
-    shutdown: Arc<AtomicBool>,
-    v4l2_active: Arc<AtomicBool>,
-) -> Result<thread::JoinHandle<()>> {
-    let handle = thread::Builder::new()
-        .name("v4l2-writer".into())
-        .spawn(move || {
-            if let Err(e) = v4l2_writer_loop(
-                &device_path,
-                frame_rx,
-                width,
-                height,
-                target_fps,
-                shutdown,
-                v4l2_active,
-            ) {
-                warn!("v4l2 writer exited: {:#}", e);
-            }
-            info!("v4l2 writer thread exiting");
+/// An open, configured v4l2loopback output device.
+#[derive(Debug)]
+pub struct V4l2Sink {
+    file: File,
+    frame_len: usize,
+}
+
+impl V4l2Sink {
+    /// Opens `device_path` and configures it for `width` x `height` YUYV.
+    pub fn open(device_path: &str, width: u32, height: u32) -> Result<Self> {
+        Ok(Self {
+            file: open_v4l2_device(device_path, width, height)?,
+            frame_len: (width as usize) * (height as usize) * 2,
         })
-        .context("Failed to spawn v4l2 writer thread")?;
-
-    Ok(handle)
-}
-
-#[cfg(target_os = "linux")]
-fn v4l2_writer_loop(
-    device_path: &str,
-    frame_rx: Receiver<crate::video::DecodedVideoFrame>,
-    width: u32,
-    height: u32,
-    target_fps: u32,
-    shutdown: Arc<AtomicBool>,
-    v4l2_active: Arc<AtomicBool>,
-) -> Result<()> {
-    let mut device = match open_v4l2_device(device_path, width, height) {
-        Ok(dev) => {
-            v4l2_active.store(true, Ordering::Relaxed);
-            Some(dev)
-        }
-        Err(e) => {
-            v4l2_active.store(false, Ordering::Relaxed);
-            warn!(
-                "v4l2loopback device '{}' unavailable ({}). Standalone app preview remains active.",
-                device_path, e
-            );
-            None
-        }
-    };
-
-    let max_frame_interval = Duration::from_secs_f64(1.0 / target_fps.max(1) as f64);
-    let expected_frame_size = (width * height * 2) as usize;
-    let mut last_pts_us: Option<i64> = None;
-    let mut last_write_instant = Instant::now();
-
-    loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-
-        let frame = match frame_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(f) => f,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-        };
-
-        if let Some(prev_pts) = last_pts_us {
-            let pts_delta_us =
-                (frame.pts_us - prev_pts).clamp(0, max_frame_interval.as_micros() as i64);
-            let target_delta = Duration::from_micros(pts_delta_us as u64);
-            let wall_elapsed = last_write_instant.elapsed();
-            if wall_elapsed < target_delta && frame_rx.is_empty() {
-                thread::sleep(target_delta - wall_elapsed);
-            }
-        }
-        last_pts_us = Some(frame.pts_us);
-        last_write_instant = Instant::now();
-
-        let Some(ref mut dev) = device else {
-            continue;
-        };
-
-        let frame_data = &frame.yuyv_data;
-        let write_res = if frame_data.len() >= expected_frame_size {
-            dev.write_all(&frame_data[..expected_frame_size])
-        } else {
-            let mut padded = frame_data.clone();
-            padded.resize(expected_frame_size, 0x80);
-            dev.write_all(&padded)
-        };
-
-        if let Err(e) = write_res {
-            error!("v4l2 write error: {}", e);
-            device = open_v4l2_device(device_path, width, height).ok();
-            v4l2_active.store(device.is_some(), Ordering::Relaxed);
-        }
     }
 
-    v4l2_active.store(false, Ordering::Relaxed);
-    Ok(())
+    /// Size in bytes of one frame the device expects.
+    pub fn frame_len(&self) -> usize {
+        self.frame_len
+    }
+
+    /// Writes one complete frame. `frame` must be exactly [`Self::frame_len`] bytes.
+    pub fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        debug_assert_eq!(frame.len(), self.frame_len);
+        self.file.write_all(frame)
+    }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn v4l2_writer_loop(
-    _device_path: &str,
-    frame_rx: Receiver<crate::video::DecodedVideoFrame>,
-    _width: u32,
-    _height: u32,
-    _target_fps: u32,
-    shutdown: Arc<AtomicBool>,
-    v4l2_active: Arc<AtomicBool>,
-) -> Result<()> {
-    // On macOS and Windows, frames are consumed by the standalone Continuity Camera
-    // preview hub (LatestFrameHub) and OBS Window/Spout/Syphon capture. Drain channel cleanly.
-    v4l2_active.store(false, Ordering::Relaxed);
-    while !shutdown.load(Ordering::Relaxed) {
-        match frame_rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(_) => {}
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_v4l2_format_layout() {
+        assert_eq!(std::mem::size_of::<V4l2PixFormat>(), 48);
+        assert_eq!(std::mem::size_of::<V4l2Format>(), 208);
+
+        let dummy = V4l2Format {
+            type_: 0,
+            _padding_align: 0,
+            fmt: V4l2PixFormat {
+                width: 0,
+                height: 0,
+                pixelformat: 0,
+                field: 0,
+                bytesperline: 0,
+                sizeimage: 0,
+                colorspace: 0,
+                priv_: 0,
+                flags: 0,
+                encoding_or_ycbcr: 0,
+                quantization: 0,
+                xfer_func: 0,
+            },
+            _padding: [0u8; 200 - std::mem::size_of::<V4l2PixFormat>()],
+        };
+
+        let base_ptr = &dummy as *const V4l2Format as usize;
+        let fmt_ptr = &dummy.fmt as *const V4l2PixFormat as usize;
+        let width_ptr = &dummy.fmt.width as *const u32 as usize;
+        let pixelformat_ptr = &dummy.fmt.pixelformat as *const u32 as usize;
+
+        assert_eq!(fmt_ptr - base_ptr, 8);
+        assert_eq!(width_ptr - base_ptr, 8);
+        assert_eq!(pixelformat_ptr - base_ptr, 16);
     }
-    Ok(())
+
+    #[test]
+    fn opening_a_missing_device_explains_how_to_fix_it() {
+        let error = V4l2Sink::open("/dev/camdroid-does-not-exist", 1920, 1080).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("modprobe v4l2loopback"), "got: {message}");
+    }
 }

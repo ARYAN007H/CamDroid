@@ -1,7 +1,10 @@
+pub mod v2;
 pub mod wire;
 
-pub use wire::{
-    read_packet, read_packet_into, write_packet, ClientHandshake, ControlCommand,
-    LiveStatusMetadata, Packet, PacketFlags, PacketType, ServerCapabilities,
-};
+#[cfg(test)]
+mod v2_tests;
 
+pub use wire::{
+    read_packet, write_packet, ClientHandshake, ControlCommand, Packet, PacketType,
+    ServerCapabilities,
+};

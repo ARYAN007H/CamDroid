@@ -1,28 +1,18 @@
-// CamDroid Wire Protocol v2.0
+// CamDroid Wire Protocol
 //
-// Binary protocol for streaming video, audio, telemetry, and control commands
+// Binary protocol for streaming video, audio, and control commands
 // between the Android phone (server) and the desktop client.
 //
-// Packet format (14-byte header):
-// [Type: 1B] [Flags: 1B] [PTS_us: 8B LE] [Length: 4B LE] [Payload: N bytes]
+// Packet format: [Type: 1 byte] [Length: 4 bytes LE] [Payload: N bytes]
 
 use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum allowed payload size (16 MB) to prevent memory exhaustion
 /// from malformed or corrupted packets.
 const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
-
-/// Bitmask flags carried in the 2nd byte of the v2.0 packet header.
-pub mod PacketFlags {
-    pub const NONE: u8 = 0x00;
-    pub const KEYFRAME: u8 = 0x01;
-    pub const CONFIG: u8 = 0x02;
-    pub const MIRRORED: u8 = 0x04;
-}
 
 /// Identifies the type of data carried in a protocol packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,20 +50,11 @@ impl PacketType {
     }
 }
 
-/// A single protocol packet with its type, flags, hardware timestamp, and payload.
+/// A single protocol packet with its type and payload.
 #[derive(Debug, Clone)]
 pub struct Packet {
     pub packet_type: PacketType,
-    pub flags: u8,
-    pub pts_us: i64,
     pub payload: Vec<u8>,
-}
-
-fn now_us() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(0)
 }
 
 impl Packet {
@@ -81,35 +62,11 @@ impl Packet {
     pub fn new(packet_type: PacketType, payload: Vec<u8>) -> Self {
         Self {
             packet_type,
-            flags: PacketFlags::NONE,
-            pts_us: now_us(),
             payload,
         }
     }
 
-    /// Create a packet with explicit flags and presentation timestamp.
-    pub fn with_pts(packet_type: PacketType, flags: u8, pts_us: i64, payload: Vec<u8>) -> Self {
-        Self {
-            packet_type,
-            flags,
-            pts_us,
-            payload,
-        }
-    }
-
-    pub fn is_keyframe(&self) -> bool {
-        (self.flags & PacketFlags::KEYFRAME) != 0
-    }
-
-    pub fn is_config(&self) -> bool {
-        (self.flags & PacketFlags::CONFIG) != 0
-    }
-
-    pub fn is_mirrored(&self) -> bool {
-        (self.flags & PacketFlags::MIRRORED) != 0
-    }
-
-    /// Create an empty heartbeat packet carrying current timestamp.
+    /// Create an empty heartbeat packet.
     pub fn heartbeat() -> Self {
         Self::new(PacketType::Heartbeat, Vec::new())
     }
@@ -127,25 +84,29 @@ impl Packet {
     }
 }
 
-/// Read a packet into a caller-supplied reusable buffer, then swap/clone only what is needed.
-pub fn read_packet_into(
-    reader: &mut impl Read,
-    scratch: &mut Vec<u8>,
-) -> Result<(PacketType, u8, i64)> {
+/// Read exactly one complete packet from the given reader.
+///
+/// Handles partial TCP reads by looping until all bytes are received.
+/// Returns an error on connection close (zero-byte read) or I/O failure.
+pub fn read_packet(reader: &mut impl Read) -> Result<Packet> {
+    // Read the 1-byte type field
     let type_byte = reader
         .read_u8()
         .context("Failed to read packet type (connection closed?)")?;
+    read_packet_after_type(reader, type_byte)
+}
+
+/// Decode a legacy packet after a transport has already consumed its type
+/// byte while discriminating it from a v2 envelope.
+pub fn read_packet_after_type(reader: &mut impl Read, type_byte: u8) -> Result<Packet> {
     let packet_type = PacketType::from_byte(type_byte)?;
-    let flags = reader
-        .read_u8()
-        .context("Failed to read packet flags")?;
-    let pts_us = reader
-        .read_i64::<LittleEndian>()
-        .context("Failed to read packet PTS_us")?;
+
+    // Read the 4-byte payload length (little-endian)
     let length = reader
         .read_u32::<LittleEndian>()
         .context("Failed to read packet length")?;
 
+    // Validate payload size to prevent memory exhaustion
     if length > MAX_PAYLOAD_SIZE {
         bail!(
             "Packet payload too large: {} bytes (max {})",
@@ -154,39 +115,28 @@ pub fn read_packet_into(
         );
     }
 
-    scratch.resize(length as usize, 0u8);
+    // Read the payload — read_exact handles partial reads internally
+    let mut payload = vec![0u8; length as usize];
     if length > 0 {
         reader
-            .read_exact(&mut scratch[..length as usize])
+            .read_exact(&mut payload)
             .context("Failed to read packet payload (connection closed mid-packet?)")?;
     }
 
-    Ok((packet_type, flags, pts_us))
-}
-
-/// Read exactly one complete v2.0 packet from the given reader.
-pub fn read_packet(reader: &mut impl Read) -> Result<Packet> {
-    let mut payload = Vec::new();
-    let (packet_type, flags, pts_us) = read_packet_into(reader, &mut payload)?;
     Ok(Packet {
         packet_type,
-        flags,
-        pts_us,
         payload,
     })
 }
 
-/// Write a complete v2.0 packet (14-byte header + payload) to the given writer.
+/// Write a complete packet to the given writer.
+///
+/// Serializes the type byte, payload length, and payload data.
+/// Flushes the writer to ensure the packet is sent immediately.
 pub fn write_packet(writer: &mut impl Write, packet: &Packet) -> Result<()> {
     writer
         .write_u8(packet.packet_type as u8)
         .context("Failed to write packet type")?;
-    writer
-        .write_u8(packet.flags)
-        .context("Failed to write packet flags")?;
-    writer
-        .write_i64::<LittleEndian>(packet.pts_us)
-        .context("Failed to write packet PTS_us")?;
     writer
         .write_u32::<LittleEndian>(packet.payload.len() as u32)
         .context("Failed to write packet length")?;
@@ -218,9 +168,9 @@ pub enum ControlCommand {
     Stop,
     /// Switch between front and rear cameras.
     SwitchCamera,
-    /// Set the camera zoom ratio (e.g. 0.5 for ultra-wide, 1.0 for main, 2.0+ for telephoto).
+    /// Set the camera zoom ratio (1.0 = no zoom).
     SetZoom { value: f32 },
-    /// Set focus mode ("auto", "manual", or "tap") and optional manual distance or tap coordinates.
+    /// Set focus mode and optional manual distance.
     SetFocus {
         mode: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,15 +180,8 @@ pub enum ControlCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         y: Option<f32>,
     },
-    /// Set exposure compensation in EV steps (-4 to +4).
+    /// Set exposure compensation in EV steps.
     SetExposure { compensation: i32 },
-    /// Set manual ISO and shutter speed in nanoseconds.
-    SetManualExposure {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        iso: Option<i32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        shutter_ns: Option<i64>,
-    },
     /// Set white balance mode (auto, daylight, tungsten, fluorescent, cloudy).
     SetWhiteBalance { mode: String },
     /// Enable or disable the camera torch/flash.
@@ -257,7 +200,7 @@ pub enum ControlCommand {
     RequestKeyframe,
 }
 
-/// Metadata sent during the initial handshake.
+/// Metadata sent during the initial handshake or as status updates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientHandshake {
     pub version: String,
@@ -280,76 +223,20 @@ pub struct ServerCapabilities {
     pub audio: bool,
     #[serde(default)]
     pub battery: u32,
-    #[serde(default = "default_min_zoom")]
-    pub min_zoom: f32,
-    #[serde(default = "default_max_zoom")]
-    pub max_zoom: f32,
-}
-
-fn default_min_zoom() -> f32 {
-    0.5
-}
-fn default_max_zoom() -> f32 {
-    10.0
 }
 
 impl Default for ServerCapabilities {
     fn default() -> Self {
         Self {
-            version: "2.0".to_string(),
-            device: "Android Camera".to_string(),
-            codecs: vec!["h264".to_string(), "h265".to_string(), "mjpeg".to_string()],
-            resolutions: vec!["1080p".to_string(), "1440p".to_string(), "4k".to_string()],
+            version: "unknown".to_string(),
+            device: "unknown".to_string(),
+            codecs: vec!["h264".to_string()],
+            resolutions: vec!["1080p".to_string()],
             fps: vec![30, 60],
             audio: true,
             battery: 100,
-            min_zoom: 0.5,
-            max_zoom: 10.0,
         }
     }
-}
-
-/// Real-time 1Hz telemetry status broadcast by the Android server over METADATA packets.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LiveStatusMetadata {
-    #[serde(default)]
-    pub r#type: String,
-    #[serde(default)]
-    pub fps: f32,
-    #[serde(default)]
-    pub bitrate: u64,
-    #[serde(default)]
-    pub resolution: String,
-    #[serde(default)]
-    pub codec: String,
-    #[serde(default)]
-    pub battery: u32,
-    #[serde(default)]
-    pub charging: bool,
-    #[serde(default)]
-    pub temperature: f32,
-    #[serde(default)]
-    pub dropped_frames: u64,
-    #[serde(default)]
-    pub zoom: f32,
-    #[serde(default)]
-    pub min_zoom: f32,
-    #[serde(default)]
-    pub max_zoom: f32,
-    #[serde(default)]
-    pub use_front_camera: bool,
-    #[serde(default)]
-    pub flash: bool,
-    #[serde(default)]
-    pub mirror: bool,
-    #[serde(default)]
-    pub focus_mode: String,
-    #[serde(default)]
-    pub focus_distance: f32,
-    #[serde(default)]
-    pub exposure_compensation: i32,
-    #[serde(default)]
-    pub white_balance: String,
 }
 
 #[cfg(test)]
@@ -362,7 +249,6 @@ mod tests {
         let pkt = Packet::heartbeat();
         let mut buf = Vec::new();
         write_packet(&mut buf, &pkt).unwrap();
-        assert_eq!(buf.len(), 14); // 14-byte header, 0 payload
         let mut cursor = Cursor::new(buf);
         let decoded = read_packet(&mut cursor).unwrap();
         assert_eq!(decoded.packet_type, PacketType::Heartbeat);
@@ -370,22 +256,14 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_video_frame_with_pts_and_flags() {
+    fn test_roundtrip_video_frame() {
         let data = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAB, 0xCD];
-        let pkt = Packet::with_pts(
-            PacketType::VideoFrame,
-            PacketFlags::KEYFRAME | PacketFlags::MIRRORED,
-            1_234_567_890,
-            data.clone(),
-        );
+        let pkt = Packet::new(PacketType::VideoFrame, data.clone());
         let mut buf = Vec::new();
         write_packet(&mut buf, &pkt).unwrap();
         let mut cursor = Cursor::new(buf);
         let decoded = read_packet(&mut cursor).unwrap();
         assert_eq!(decoded.packet_type, PacketType::VideoFrame);
-        assert!(decoded.is_keyframe());
-        assert!(decoded.is_mirrored());
-        assert_eq!(decoded.pts_us, 1_234_567_890);
         assert_eq!(decoded.payload, data);
     }
 
@@ -407,9 +285,7 @@ mod tests {
 
     #[test]
     fn test_invalid_packet_type() {
-        let mut buf = vec![0xFF, 0x00]; // invalid type 0xFF
-        buf.extend_from_slice(&0i64.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes());
+        let buf = vec![0xFF, 0x00, 0x00, 0x00, 0x00]; // invalid type 0xFF
         let mut cursor = Cursor::new(buf);
         assert!(read_packet(&mut cursor).is_err());
     }
@@ -418,11 +294,8 @@ mod tests {
     fn test_oversized_payload_rejected() {
         let mut buf = Vec::new();
         buf.push(0x01); // VideoFrame
-        buf.push(0x00); // Flags
-        buf.write_i64::<LittleEndian>(0).unwrap();
         buf.write_u32::<LittleEndian>(MAX_PAYLOAD_SIZE + 1).unwrap();
         let mut cursor = Cursor::new(buf);
         assert!(read_packet(&mut cursor).is_err());
     }
 }
-

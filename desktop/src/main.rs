@@ -92,6 +92,9 @@ fn main() -> Result<()> {
         v4l2_device: args.device,
         audio_device: args.audio_device,
         discovery_timeout: args.discovery_timeout,
+        // The CLI has no window, so the virtual camera is its only output.
+        output: camdroid_client::OutputMode::VirtualCamera,
+        ..SessionConfig::default()
     };
 
     // Connect and start streaming
@@ -115,8 +118,12 @@ fn main() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
+    let reason = session.telemetry().snapshot().disconnect_reason;
     session.stop()?;
-    info!("CamDroid client shut down cleanly. Goodbye!");
+    match reason {
+        Some(reason) => info!("Session ended: {reason}"),
+        None => info!("CamDroid client shut down cleanly. Goodbye!"),
+    }
 
     Ok(())
 }

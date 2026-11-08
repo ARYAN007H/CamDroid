@@ -19,6 +19,7 @@ import androidx.lifecycle.lifecycleScope
 import com.camdroid.camera.CameraManager
 import com.camdroid.encoder.*
 import com.camdroid.network.NsdHelper
+import com.camdroid.network.MediaSender
 import com.camdroid.network.StreamServer
 import com.camdroid.util.BatteryMonitor
 import com.camdroid.util.NetworkUtils
@@ -50,6 +51,7 @@ class CameraStreamingService : LifecycleService() {
     private var cameraManager: CameraManager? = null
     private var videoEncoder: VideoEncoder? = null
     private var audioEncoder: AudioEncoder? = null
+    private var mediaSender: MediaSender? = null
     private var streamServer: StreamServer? = null
     private var nsdHelper: NsdHelper? = null
     private var batteryMonitor: BatteryMonitor? = null
@@ -64,19 +66,11 @@ class CameraStreamingService : LifecycleService() {
     private var serverPort = 4747
     private var audioEnabled = true
 
-    // Stats & Adaptive Bitrate (ABR) state
+    // Stats
     private val frameCount = AtomicLong(0)
-    private val encodedBytesCount = AtomicLong(0)
     private val isStreaming = AtomicBoolean(false)
-    private val isMediaPipelineActive = AtomicBoolean(false)
-    private var fallbackStartJob: Job? = null
-
-    @Volatile
-    private var activeBitrateBps: Int = EncoderConfig.getDefaultBitrate(VideoCodecType.H264, ResolutionPreset.FHD)
-    @Volatile
-    private var lastAbrAdjustmentMs: Long = 0L
-    @Volatile
-    private var lastKeyframeRequestMs: Long = 0L
+    private val nextSessionId = AtomicLong(1)
+    private var activeSessionId = 0L
 
     private val gson = Gson()
 
@@ -114,13 +108,11 @@ class CameraStreamingService : LifecycleService() {
                 r.displayName.equals(resName, ignoreCase = true)
             } ?: ResolutionPreset.FHD
 
-            val defaultBitrate = EncoderConfig.getDefaultBitrate(codec, resolution)
-            activeBitrateBps = defaultBitrate
             currentConfig = EncoderConfig(
                 codec = codec,
                 resolution = resolution,
                 fps = fps,
-                bitrate = defaultBitrate
+                bitrate = EncoderConfig.getDefaultBitrate(codec, resolution)
             )
         }
 
@@ -145,7 +137,7 @@ class CameraStreamingService : LifecycleService() {
         StreamingController.isStreaming.value = true
         StreamingController.useFrontCamera.value = useFrontCamera
 
-        // Setup event listeners for bidirectional controls sync
+        // Setup event listeners for double-direction controls sync
         StreamingController.onZoomChanged = { ratio ->
             cameraManager?.setZoom(ratio)
             StreamingController.currentZoom.value = ratio
@@ -181,85 +173,37 @@ class CameraStreamingService : LifecycleService() {
             lifecycleScope.launch {
                 useFrontCamera = useFront
                 StreamingController.useFrontCamera.value = useFront
-                if (isMediaPipelineActive.get()) {
-                    restartCamera()
-                }
+                restartCamera()
             }
         }
         StreamingController.onPreviewSurfaceChanged = {
-            if (isStreaming.get() && isMediaPipelineActive.get()) {
+            if (isStreaming.get()) {
                 lifecycleScope.launch {
                     restartCamera()
                 }
             }
         }
 
-        // Real-time telemetry & Adaptive Bitrate (ABR) recovery coroutine (1Hz)
+        // Stats monitoring coroutine
         lifecycleScope.launch {
             var lastCount = 0L
-            var lastBytes = 0L
             var lastTime = System.currentTimeMillis()
-            var cleanSeconds = 0
-
             while (isStreaming.get()) {
                 delay(1000)
                 val currentCount = frameCount.get()
-                val currentBytes = encodedBytesCount.get()
                 val currentTime = System.currentTimeMillis()
                 val deltaFrames = currentCount - lastCount
-                val deltaBytes = currentBytes - lastBytes
                 val deltaTimeMs = currentTime - lastTime
-
                 if (deltaTimeMs > 0) {
                     val fps = (deltaFrames * 1000f) / deltaTimeMs
-                    val bps = (deltaBytes * 8L * 1000L) / deltaTimeMs
                     StreamingController.currentFps.value = fps
+                    
+                    // Simple bitrate calculation in Mbps
+                    val typicalSizeBits = 100000 * 8L // 100KB frame
+                    val bps = (deltaFrames * typicalSizeBits * 1000f) / deltaTimeMs
                     StreamingController.currentBitrate.value = bps / 1_000_000f
-
-                    // Broadcast real-time status metadata packet to desktop client
-                    if (streamServer?.isClientConnected == true && isMediaPipelineActive.get()) {
-                        val statusJson = JsonObject().apply {
-                            addProperty("type", "status")
-                            addProperty("fps", fps)
-                            addProperty("bitrate", bps)
-                            addProperty("resolution", "${currentConfig.resolution.width}x${currentConfig.resolution.height}")
-                            addProperty("codec", currentConfig.codec.displayName.lowercase())
-                            addProperty("battery", batteryMonitor?.batteryLevel ?: StreamingController.batteryLevel.value)
-                            addProperty("charging", StreamingController.isCharging.value)
-                            addProperty("temperature", 36.5f)
-                            addProperty("dropped_frames", streamServer?.droppedFrames?.get() ?: 0L)
-                            addProperty("zoom", StreamingController.currentZoom.value)
-                            addProperty("min_zoom", StreamingController.minZoom.value)
-                            addProperty("max_zoom", StreamingController.maxZoom.value)
-                            addProperty("use_front_camera", useFrontCamera)
-                            addProperty("flash", StreamingController.flashEnabled.value)
-                            addProperty("mirror", StreamingController.mirrorEnabled.value)
-                            addProperty("focus_mode", StreamingController.focusMode.value)
-                            addProperty("focus_distance", StreamingController.focusDistance.value)
-                            addProperty("exposure_compensation", StreamingController.exposureCompensation.value)
-                            addProperty("white_balance", StreamingController.whiteBalanceMode.value)
-                        }
-                        streamServer?.sendMetadata(gson.toJson(statusJson))
-                    }
-
-                    // Adaptive Bitrate (ABR) gentle ramp-up after 3 clean seconds without congestion
-                    if (currentConfig.adaptiveBitrate && isMediaPipelineActive.get()) {
-                        val timeSinceCongestion = currentTime - lastAbrAdjustmentMs
-                        if (timeSinceCongestion > 3000L && activeBitrateBps < currentConfig.bitrate) {
-                            cleanSeconds++
-                            if (cleanSeconds >= 3) {
-                                cleanSeconds = 0
-                                val steppedUp = (activeBitrateBps * 1.12).toInt().coerceAtMost(currentConfig.bitrate)
-                                activeBitrateBps = steppedUp
-                                videoEncoder?.updateBitrate(steppedUp)
-                            }
-                        } else {
-                            cleanSeconds = 0
-                        }
-                    }
                 }
                 lastCount = currentCount
-                lastBytes = currentBytes
                 lastTime = currentTime
             }
         }
@@ -273,14 +217,13 @@ class CameraStreamingService : LifecycleService() {
             onLowBattery = {
                 Log.w(TAG, "Low battery — reducing quality")
                 lifecycleScope.launch {
-                    activeBitrateBps = currentConfig.bitrate / 2
-                    videoEncoder?.updateBitrate(activeBitrateBps)
+                    videoEncoder?.updateBitrate(currentConfig.bitrate / 2)
                 }
             }
             startMonitoring()
         }
 
-        // Start TCP server with congestion callback wired to keyframe recovery + ABR step-down
+        // Start TCP server
         streamServer = StreamServer(
             port = serverPort,
             onControlCommand = { cmd -> handleControlCommand(cmd) },
@@ -288,33 +231,8 @@ class CameraStreamingService : LifecycleService() {
                 lifecycleScope.launch { onClientConnected() }
             },
             onClientDisconnected = {
-                fallbackStartJob?.cancel()
-                isMediaPipelineActive.set(false)
                 StreamingController.isConnected.value = false
-                lifecycleScope.launch {
-                    cameraManager?.close()
-                    videoEncoder?.stop()
-                    audioEncoder?.stop()
-                }
                 updateNotification("Waiting for client...")
-            },
-            onNetworkCongestion = { _, _ ->
-                val now = System.currentTimeMillis()
-                // Request immediate IDR keyframe (debounced to 250ms) so dropped P-frames never corrupt video
-                if (now - lastKeyframeRequestMs > 250L) {
-                    lastKeyframeRequestMs = now
-                    videoEncoder?.requestKeyFrame()
-                }
-                // Step down bitrate by 20% down to a floor of 35% of nominal bitrate
-                if (currentConfig.adaptiveBitrate && now - lastAbrAdjustmentMs > 800L) {
-                    lastAbrAdjustmentMs = now
-                    val minFloor = (currentConfig.bitrate * 0.35).toInt().coerceAtLeast(1_500_000)
-                    val reduced = (activeBitrateBps * 0.80).toInt().coerceAtLeast(minFloor)
-                    if (reduced < activeBitrateBps) {
-                        activeBitrateBps = reduced
-                        videoEncoder?.updateBitrate(reduced)
-                    }
-                }
             }
         ).also { it.start(lifecycleScope) }
 
@@ -329,87 +247,96 @@ class CameraStreamingService : LifecycleService() {
         Log.i(TAG, "Server started on $ipAddress:$serverPort")
     }
 
-    /**
-     * Phase 1 of Two-Phase Handshake:
-     * Send server capabilities immediately on connect and wait for the client's `start` command
-     * (with a 1500ms fallback auto-start for legacy clients).
-     */
+    /** Capabilities must be answerable before the streaming camera exists. */
+    private fun cameraCapabilityQuery(): CameraManager = cameraManager ?: CameraManager(this)
+
     private suspend fun onClientConnected() {
-        Log.i(TAG, "Client connected — sending capabilities and awaiting 'start' command...")
+        Log.i(TAG, "Client connected, waiting for stream negotiation...")
         StreamingController.isConnected.value = true
 
+        // Task 7 (lite): report what the active camera actually supports rather
+        // than the configured wish. The AE range list is Camera2's fps truth;
+        // the stream configuration map is the truth for output sizes.
+        val advertisedPreset = when {
+            useFrontCamera && currentConfig.resolution == ResolutionPreset.QHD -> {
+                // Budget front sensors render QHD by upscaling, which the
+                // encoder cannot sustain (measured 10-13 fps). Cap at FHD.
+                ResolutionPreset.FHD
+            }
+            cameraCapabilityQuery().supportsResolution(useFrontCamera, currentConfig.resolution) == false ->
+                ResolutionPreset.FHD
+            else -> currentConfig.resolution
+        }
+        val maxFps = cameraCapabilityQuery().queryMaxFps(useFrontCamera, advertisedPreset)
+        val mode = JsonObject().apply {
+            addProperty("width", advertisedPreset.width)
+            addProperty("height", advertisedPreset.height)
+            addProperty("fps", maxFps)
+            addProperty("min_bitrate_bps", 1_000_000L)
+            addProperty("max_bitrate_bps", 50_000_000L)
+        }
+        val capabilityData = JsonObject().apply {
+            add("protocol_versions", gson.toJsonTree(listOf(2)))
+            // Advertise every codec the encoder stack supports: the client's
+            // codec wish is adopted on start, not snapped to the phone's UI.
+            add("codecs", gson.toJsonTree(listOf("h264", "h265")))
+            add("video_modes", gson.toJsonTree(listOf(mode)))
+            add("audio_codecs", gson.toJsonTree(if (audioEnabled) listOf("aac") else emptyList<String>()))
+        }
         val capabilities = JsonObject().apply {
             addProperty("type", "capabilities")
-            addProperty("version", "2.0")
-            addProperty("device", NetworkUtils.getDeviceName())
-            add("codecs", gson.toJsonTree(listOf("h264", "h265", "mjpeg")))
-            add("resolutions", gson.toJsonTree(listOf("1080p", "1440p", "4k")))
-            add("fps", gson.toJsonTree(listOf(30, 60)))
-            addProperty("audio", true)
-            addProperty("battery", batteryMonitor?.batteryLevel ?: 100)
-            addProperty("min_zoom", StreamingController.minZoom.value)
-            addProperty("max_zoom", StreamingController.maxZoom.value)
+            add("data", capabilityData)
         }
         streamServer?.sendMetadata(gson.toJson(capabilities))
-
-        // Fallback auto-start if a client does not send a 'start' command within 1.5s
-        fallbackStartJob?.cancel()
-        fallbackStartJob = lifecycleScope.launch {
-            delay(1500)
-            if (streamServer?.isClientConnected == true && !isMediaPipelineActive.get()) {
-                Log.i(TAG, "No 'start' command received within 1.5s — auto-starting media pipeline with current config")
-                startMediaPipeline()
-            }
-        }
+        updateNotification("Connected • negotiating stream")
     }
 
-    /**
-     * Phase 2 of Two-Phase Handshake:
-     * Starts (or restarts) the hardware encoder + Camera2 pipeline using `currentConfig`.
-     */
-    private suspend fun startMediaPipeline() {
-        fallbackStartJob?.cancel()
-        cameraManager?.close()
-        videoEncoder?.stop()
-        audioEncoder?.stop()
+    private suspend fun startAcceptedStream() {
+        // A new negotiated start must always reconfigure: a live encoder from
+        // a previous session would otherwise keep streaming its old config
+        // (fps/codec/resolution) and the new settings would be ignored.
+        if (videoEncoder != null) {
+            Log.i(TAG, "Restarting media pipeline for newly negotiated stream")
+            cameraManager?.close()
+            videoEncoder?.stop()
+            audioEncoder?.stop()
+            mediaSender?.stop()
+            videoEncoder = null
+            audioEncoder = null
+            mediaSender = null
+        }
+        mediaSender = MediaSender(activeSessionId, writeMedia = { packet ->
+            streamServer?.sendV2Packet(packet)
+        }, onVideoDrop = {
+            // The sender shed a frame: the receiver's gate will now wait for a
+            // key frame, so produce one immediately instead of at the next GOP.
+            videoEncoder?.requestKeyFrame()
+        }).also { it.start() }
 
-        activeBitrateBps = currentConfig.bitrate
-        isMediaPipelineActive.set(true)
-
-        // Start hardware video encoder
+        // Start video encoder
         videoEncoder = VideoEncoder(currentConfig) { data, isConfig, isKeyFrame, pts ->
-            encodedBytesCount.addAndGet(data.size.toLong())
             if (isConfig) {
-                streamServer?.sendVideoConfig(data, pts)
+                mediaSender?.offerVideo(data, pts * 1_000L, isConfig = true)
             } else {
-                streamServer?.sendVideoFrame(
-                    data = data,
-                    isKeyFrame = isKeyFrame,
-                    isMirrored = StreamingController.mirrorEnabled.value,
-                    ptsUs = pts
-                )
+                mediaSender?.offerVideo(data, pts * 1_000L, isKeyFrame = isKeyFrame)
                 frameCount.incrementAndGet()
             }
         }.also { it.start() }
 
-        // Start hardware audio encoder
+        // Start audio encoder
         if (audioEnabled) {
             audioEncoder = AudioEncoder { data, isConfig, pts ->
-                encodedBytesCount.addAndGet(data.size.toLong())
                 if (isConfig) {
-                    streamServer?.sendAudioConfig(data, pts)
+                    mediaSender?.offerAudio(data, pts * 1_000L, isConfig = true)
                 } else {
-                    streamServer?.sendAudioFrame(data, pts)
+                    mediaSender?.offerAudio(data, pts * 1_000L)
                 }
             }.also { it.start() }
         }
 
-        // Start Camera2 capture session connected to the encoder Surface
+        // Start camera
         val encoderSurface = videoEncoder?.inputSurface ?: return
         startCamera(encoderSurface)
-
-        // Request an immediate IDR keyframe so the desktop decoder locks on within 1 frame
-        videoEncoder?.requestKeyFrame()
 
         val ipAddress = NetworkUtils.getWifiIpAddress(this) ?: "?"
         updateNotification("Streaming • ${currentConfig.resolution.displayName}@${currentConfig.fps}fps • $ipAddress:$serverPort")
@@ -417,43 +344,31 @@ class CameraStreamingService : LifecycleService() {
 
     private suspend fun startCamera(encoderSurface: Surface) {
         val previewSurf = StreamingController.activePreviewSurface
+        if (previewSurf != null) {
+            Log.i(TAG, "Starting camera with active preview surface")
+        } else {
+            Log.i(TAG, "Starting camera WITHOUT preview surface (dim/background mode)")
+        }
+
         cameraManager = CameraManager(this).apply {
             initialize()
-            openCamera(previewSurf, encoderSurface, useFrontCamera, currentConfig.fps)
-            StreamingController.minZoom.value = minZoom
+            openCamera(previewSurf, encoderSurface, useFrontCamera, currentConfig.fps, currentConfig.resolution)
+            
+            // Sync camera limits to controller
             StreamingController.maxZoom.value = maxZoom
         }
-        Log.i(TAG, "Camera started (zoom range ${StreamingController.minZoom.value}x..${StreamingController.maxZoom.value}x)")
+        Log.i(TAG, "Camera started")
     }
 
     private fun handleControlCommand(cmd: JsonObject) {
-        val command = cmd.get("cmd")?.asString ?: return
+        val command = cmd.get("cmd")?.asString
+        if (command == null) {
+            handleSessionMessage(cmd)
+            return
+        }
         Log.d(TAG, "Handling control: $command")
 
         when (command) {
-            "start" -> {
-                val codecStr = cmd.get("codec")?.asString ?: currentConfig.codec.displayName
-                val resStr = cmd.get("resolution")?.asString ?: currentConfig.resolution.displayName
-                val fpsVal = cmd.get("fps")?.asInt ?: currentConfig.fps
-                val audioVal = if (cmd.has("audio")) cmd.get("audio").asBoolean else audioEnabled
-
-                val codec = VideoCodecType.values().firstOrNull {
-                    it.displayName.equals(codecStr, true) || it.name.equals(codecStr, true)
-                } ?: VideoCodecType.H264
-
-                val preset = ResolutionPreset.values().firstOrNull {
-                    it.displayName.equals(resStr, true)
-                } ?: ResolutionPreset.FHD
-
-                audioEnabled = audioVal
-                currentConfig = currentConfig.copy(
-                    codec = codec,
-                    resolution = preset,
-                    fps = fpsVal,
-                    bitrate = EncoderConfig.getDefaultBitrate(codec, preset)
-                )
-                lifecycleScope.launch { startMediaPipeline() }
-            }
             "switch_camera" -> {
                 lifecycleScope.launch {
                     useFrontCamera = !useFrontCamera
@@ -468,10 +383,8 @@ class CameraStreamingService : LifecycleService() {
             }
             "set_focus" -> {
                 val mode = cmd.get("mode")?.asString ?: return
-                val distance = if (cmd.has("distance") && !cmd.get("distance").isJsonNull) cmd.get("distance").asFloat else 0f
-                val tapX = if (cmd.has("x") && !cmd.get("x").isJsonNull) cmd.get("x").asFloat else null
-                val tapY = if (cmd.has("y") && !cmd.get("y").isJsonNull) cmd.get("y").asFloat else null
-                cameraManager?.setFocus(mode, distance, tapX, tapY)
+                val distance = cmd.get("distance")?.asFloat ?: 0f
+                cameraManager?.setFocus(mode, distance)
                 StreamingController.focusMode.value = mode
                 StreamingController.focusDistance.value = distance
             }
@@ -479,11 +392,6 @@ class CameraStreamingService : LifecycleService() {
                 val comp = cmd.get("compensation")?.asInt ?: return
                 cameraManager?.setExposureCompensation(comp)
                 StreamingController.exposureCompensation.value = comp
-            }
-            "set_manual_exposure" -> {
-                val iso = if (cmd.has("iso") && !cmd.get("iso").isJsonNull) cmd.get("iso").asInt else null
-                val shutter = if (cmd.has("shutter_ns") && !cmd.get("shutter_ns").isJsonNull) cmd.get("shutter_ns").asLong else null
-                cameraManager?.setManualExposure(iso, shutter)
             }
             "set_white_balance" -> {
                 val mode = cmd.get("mode")?.asString ?: return
@@ -503,39 +411,25 @@ class CameraStreamingService : LifecycleService() {
             "set_resolution" -> {
                 val value = cmd.get("value")?.asString ?: return
                 val preset = ResolutionPreset.values().firstOrNull { it.displayName.equals(value, true) } ?: return
-                currentConfig = currentConfig.copy(
-                    resolution = preset,
-                    bitrate = EncoderConfig.getDefaultBitrate(currentConfig.codec, preset)
-                )
-                lifecycleScope.launch { startMediaPipeline() }
+                currentConfig = currentConfig.copy(resolution = preset, bitrate = EncoderConfig.getDefaultBitrate(currentConfig.codec, preset))
+                lifecycleScope.launch { restartEncoder() }
             }
             "set_fps" -> {
                 val value = cmd.get("value")?.asInt ?: return
                 currentConfig = currentConfig.copy(fps = value)
-                lifecycleScope.launch { startMediaPipeline() }
+                lifecycleScope.launch { restartEncoder() }
             }
             "set_codec" -> {
                 val value = cmd.get("value")?.asString ?: return
                 val codec = VideoCodecType.values().firstOrNull {
                     it.displayName.equals(value, true) || it.name.equals(value, true)
                 } ?: return
-                currentConfig = currentConfig.copy(
-                    codec = codec,
-                    bitrate = EncoderConfig.getDefaultBitrate(codec, currentConfig.resolution)
-                )
-                lifecycleScope.launch { startMediaPipeline() }
+                currentConfig = currentConfig.copy(codec = codec, bitrate = EncoderConfig.getDefaultBitrate(codec, currentConfig.resolution))
+                lifecycleScope.launch { restartEncoder() }
             }
             "set_bitrate" -> {
                 val value = cmd.get("value")?.asLong ?: return
-                if (value <= 0L) {
-                    currentConfig = currentConfig.copy(adaptiveBitrate = true)
-                    activeBitrateBps = currentConfig.bitrate
-                    videoEncoder?.updateBitrate(activeBitrateBps)
-                } else {
-                    currentConfig = currentConfig.copy(adaptiveBitrate = false)
-                    activeBitrateBps = value.toInt()
-                    videoEncoder?.updateBitrate(activeBitrateBps)
-                }
+                videoEncoder?.updateBitrate(value.toInt())
             }
             "request_keyframe" -> {
                 videoEncoder?.requestKeyFrame()
@@ -547,20 +441,106 @@ class CameraStreamingService : LifecycleService() {
         }
     }
 
+    private fun handleSessionMessage(message: JsonObject) {
+        when (message.get("type")?.asString) {
+            "hello" -> Unit // capabilities were sent on connection.
+            "start" -> {
+                val request = message.getAsJsonObject("data") ?: return
+                val config = request.getAsJsonObject("config") ?: return
+                val requestedCodec = config.get("codec")?.asString
+                val width = config.get("width")?.asInt
+                val height = config.get("height")?.asInt
+                val fps = config.get("fps")?.asInt
+                val bitrate = config.get("bitrate_bps")?.asInt
+                val audio = request.get("audio_enabled")?.asBoolean ?: false
+                // The advertised capability is the truth: the phone's local UI
+                // config may wish for a mode the sensor does not offer. Validate
+                // against the camera's real capability, then adopt the request
+                // so the encoder and camera are configured exactly as negotiated.
+                val requestedPreset = ResolutionPreset.entries.firstOrNull {
+                    it.width == width && it.height == height
+                }
+                val requestedCodecType = requestedCodec?.let { name ->
+                    com.camdroid.encoder.VideoCodecType.entries.firstOrNull {
+                        it.name.lowercase() == name
+                    }
+                }
+                val error = when {
+                    requestedCodecType == null -> "Requested codec is unavailable"
+                    requestedPreset == null || fps == null ||
+                        fps > cameraCapabilityQuery().queryMaxFps(useFrontCamera, requestedPreset) ->
+                        "Requested video mode is unavailable"
+                    bitrate == null || bitrate !in 1_000_000..50_000_000 -> "Requested bitrate is unavailable"
+                    audio && !audioEnabled -> "Audio is unavailable"
+                    else -> null
+                }
+                if (error != null) {
+                    sendStreamRejected(error)
+                    return
+                }
+                currentConfig = currentConfig.copy(
+                    codec = checkNotNull(requestedCodecType),
+                    resolution = checkNotNull(requestedPreset),
+                    fps = checkNotNull(fps),
+                    bitrate = checkNotNull(bitrate),
+                )
+                activeSessionId = nextSessionId.getAndIncrement()
+                val accepted = JsonObject().apply {
+                    addProperty("session_id", activeSessionId)
+                    add("config", config)
+                    addProperty("audio_enabled", audio)
+                }
+                streamServer?.sendMetadata(gson.toJson(JsonObject().apply {
+                    addProperty("type", "stream_accepted")
+                    add("data", accepted)
+                }))
+                lifecycleScope.launch { startAcceptedStream() }
+            }
+        }
+    }
+
+    private fun sendStreamRejected(message: String) {
+        val error = JsonObject().apply {
+            addProperty("code", "unsupported_mode")
+            addProperty("message", message)
+        }
+        streamServer?.sendMetadata(gson.toJson(JsonObject().apply {
+            addProperty("type", "stream_rejected")
+            add("data", error)
+        }))
+    }
+
+    private suspend fun restartEncoder() {
+        cameraManager?.close()
+        videoEncoder?.stop()
+        audioEncoder?.stop()
+
+        videoEncoder = VideoEncoder(currentConfig) { data, isConfig, isKeyFrame, pts ->
+            if (isConfig) streamServer?.sendVideoConfig(data) else streamServer?.sendVideoFrame(data)
+        }.also { it.start() }
+
+        if (audioEnabled) {
+            audioEncoder = AudioEncoder { data, isConfig, pts ->
+                if (isConfig) streamServer?.sendAudioConfig(data) else streamServer?.sendAudioFrame(data)
+            }.also { it.start() }
+        }
+
+        val encoderSurface = videoEncoder?.inputSurface ?: return
+        startCamera(encoderSurface)
+    }
+
     private suspend fun restartCamera() {
         cameraManager?.close()
         val encoderSurface = videoEncoder?.inputSurface ?: return
         startCamera(encoderSurface)
-        videoEncoder?.requestKeyFrame()
     }
 
     private fun stopStreaming() {
-        fallbackStartJob?.cancel()
         isStreaming.set(false)
-        isMediaPipelineActive.set(false)
         StreamingController.isStreaming.value = false
         StreamingController.isConnected.value = false
-
+        
+        // Remove listeners
         StreamingController.onZoomChanged = null
         StreamingController.onFocusChanged = null
         StreamingController.onExposureChanged = null
@@ -573,6 +553,8 @@ class CameraStreamingService : LifecycleService() {
         cameraManager?.close()
         videoEncoder?.stop()
         audioEncoder?.stop()
+        mediaSender?.stop()
+        mediaSender = null
         streamServer?.stop()
         nsdHelper?.unregisterService()
         batteryMonitor?.stopMonitoring()

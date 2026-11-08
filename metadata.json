@@ -1,8 +1,0 @@
-{
-  "name": "CamDroid Studio — Continuity Camera & Pro Desktop Webcam",
-  "description": "High-performance Android-to-Desktop Continuity Camera studio with v2.0 low-latency wire protocol, OBS V4L2 virtual camera output, Virtual Ring Light (Edge Light), Studio Effects (Portrait, Studio Light, Center Stage, Desk View), and real-time cinema filters.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone"
-  ]
-}

@@ -16,8 +16,7 @@ object StreamingController {
     val currentBitrate = MutableStateFlow(0f)
 
     // Camera characteristics & controls
-    val minZoom = MutableStateFlow(0.5f)
-    val maxZoom = MutableStateFlow(10f)
+    val maxZoom = MutableStateFlow(1f)
     val currentZoom = MutableStateFlow(1f)
     val useFrontCamera = MutableStateFlow(false)
     val flashEnabled = MutableStateFlow(false)

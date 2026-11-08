@@ -2,6 +2,7 @@ package com.camdroid.encoder
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
@@ -13,8 +14,8 @@ import android.view.Surface
 /**
  * Hardware video encoder using MediaCodec.
  *
- * Configured for sub-frame low latency (zero B-frames, realtime priority,
- * operating rate = target FPS, hardware low-latency mode on API 30+).
+ * Supports H.264, H.265/HEVC, and MJPEG codecs with Surface input.
+ * Provides an input Surface that can be connected to Camera2's CaptureSession.
  */
 class VideoEncoder(
     private val config: EncoderConfig,
@@ -33,11 +34,9 @@ class VideoEncoder(
         private set
 
     /** Cached codec configuration data (SPS/PPS for H.264, VPS/SPS/PPS for H.265). */
-    @Volatile
     var codecConfigData: ByteArray? = null
         private set
 
-    @Volatile
     private var isRunning = false
 
     /**
@@ -45,11 +44,13 @@ class VideoEncoder(
      * Must be called before accessing [inputSurface].
      */
     fun start() {
-        Log.i(TAG, "Starting low-latency encoder: ${config.codec.displayName} ${config.resolution.displayName} @ ${config.fps}fps, ${config.bitrate / 1_000_000}Mbps")
+        Log.i(TAG, "Starting encoder: ${config.codec.displayName} ${config.resolution.displayName} @ ${config.fps}fps, ${config.bitrate / 1_000_000}Mbps")
 
         handlerThread = HandlerThread("VideoEncoder").also { it.start() }
         handler = Handler(handlerThread!!.looper)
 
+        val codecInfo = findEncoder(config.codec.mimeType)
+        val codecCapabilities = codecInfo.getCapabilitiesForType(config.codec.mimeType)
         val format = MediaFormat.createVideoFormat(
             config.codec.mimeType,
             config.resolution.width,
@@ -60,13 +61,14 @@ class VideoEncoder(
             setInteger(MediaFormat.KEY_FRAME_RATE, config.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, config.iFrameInterval)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-
-            // Low-latency hardware encoder tuning: disable B-frames, set realtime priority
-            setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = realtime priority
-            setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
-            setInteger(MediaFormat.KEY_LATENCY, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            if (config.codec == VideoCodecType.H264) {
+                val baseline = codecCapabilities.profileLevels.firstOrNull {
+                    it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                }
+                if (baseline != null) {
+                    setInteger(MediaFormat.KEY_PROFILE, baseline.profile)
+                    setInteger(MediaFormat.KEY_LEVEL, baseline.level)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
@@ -83,7 +85,7 @@ class VideoEncoder(
 
         encoder = codec
         isRunning = true
-        Log.i(TAG, "Encoder started with zero-B-frame low-latency profile")
+        Log.i(TAG, "Encoder started, input surface ready")
     }
 
     /** Dynamically update the encoder bitrate (for adaptive bitrate). */
@@ -104,7 +106,7 @@ class VideoEncoder(
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
             }
             enc.setParameters(params)
-            Log.d(TAG, "Immediate IDR keyframe requested")
+            Log.d(TAG, "Keyframe requested")
         }
     }
 
@@ -138,26 +140,20 @@ class VideoEncoder(
             val outputBuffer = codec.getOutputBuffer(index) ?: return
 
             try {
-                outputBuffer.position(info.offset)
-                outputBuffer.limit(info.offset + info.size)
-
+                val encoded = outputBuffer.duplicate().apply {
+                    position(info.offset)
+                    limit(info.offset + info.size)
+                }
                 if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                     // Codec configuration data (SPS/PPS for H.264, VPS/SPS/PPS for H.265)
                     val configData = ByteArray(info.size)
-                    outputBuffer.get(configData)
+                    encoded.get(configData)
                     codecConfigData = configData
                     onEncodedData(configData, true, false, info.presentationTimeUs)
                 } else if (info.size > 0) {
                     val isKeyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                     val frameData = ByteArray(info.size)
-                    outputBuffer.get(frameData)
-
-                    // Re-emit SPS/PPS before every IDR keyframe so mid-stream joiners decode cleanly
-                    if (isKeyFrame) {
-                        codecConfigData?.let { cfg ->
-                            onEncodedData(cfg, true, false, info.presentationTimeUs)
-                        }
-                    }
+                    encoded.get(frameData)
                     onEncodedData(frameData, false, isKeyFrame, info.presentationTimeUs)
                 }
             } finally {
@@ -173,5 +169,9 @@ class VideoEncoder(
             Log.e(TAG, "Encoder error", e)
         }
     }
-}
 
+    private fun findEncoder(mimeType: String): MediaCodecInfo =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
+            info.isEncoder && info.supportedTypes.any { it.equals(mimeType, ignoreCase = true) }
+        } ?: throw IllegalStateException("No hardware encoder supports $mimeType on this device")
+}
