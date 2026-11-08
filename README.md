@@ -67,7 +67,7 @@ flowchart TD
         VEnc --> Sender[MediaSender<br/>per-kind sequences · shedding]
         AEnc --> Sender
         Sender -->|CMD2 packets| Server[TCP server :4747]
-        NSD[NsdManager] -.->_camdroid._tcp.-> mDNS[mDNS]
+        NSD[NsdManager] -. "_camdroid._tcp" .-> mDNS[mDNS]
     end
 
     Server -->|WiFi · ADB forward| Core["🦀 camdroid-client core<br/>video gate · demux · ABR"]
