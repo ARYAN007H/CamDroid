@@ -1,79 +1,59 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/google/material-design-icons/master/png/device/videocam/materialiconssharp/240dp/2x/sharp_videocam_black_24dp.png" width="120" height="120" alt="CamDroid Logo">
-</p>
+<div align="center">
 
-# <p align="center">🎥 CamDroid</p>
+<img src="https://raw.githubusercontent.com/google/material-design-icons/master/png/device/videocam/materialiconssharp/240dp/2x/sharp_videocam_black_24dp.png" width="110" alt="CamDroid">
 
-<p align="center">
-  <strong>Turn your Android phone into a high-performance, ultra-low-latency virtual webcam & microphone for Linux.</strong>
-</p>
+# 🎥 CamDroid
 
-<p align="center">
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Core-Rust%20%7C%20FFmpeg-cyan?style=for-the-badge&logo=rust" alt="Rust"></a>
-  <a href="https://kotlinlang.org/"><img src="https://img.shields.io/badge/App-Kotlin%20%7C%20Compose-purple?style=for-the-badge&logo=kotlin" alt="Kotlin"></a>
-  <a href="https://tauri.app/"><img src="https://img.shields.io/badge/Studio-Tauri%20%7C%20TypeScript-24C8D8?style=for-the-badge&logo=tauri" alt="Tauri"></a>
-  <a href="https://github.com/v4l2loopback/v4l2loopback"><img src="https://img.shields.io/badge/Output-v4l2loopback-blue?style=for-the-badge" alt="v4l2loopback"></a>
-</p>
+### Your Android phone, reborn as a proper Linux webcam.
 
-<p align="center">
-  🎛️ <b>CamDroid Studio GUI</b> • 🎮 <b>Interactive CLI</b> • 📺 <b>Up to 4K @ 60 FPS</b> • 🎙️ <b>AAC Audio</b> • 🔌 <b>WiFi & USB</b> • 💡 <b>Ring Light</b>
-</p>
+**Hardware-encoded video. Real-time controls. Zero watermarks. A whole studio.**
+
+[![Release](https://img.shields.io/github/v/release/ARYAN007H/CamDroid?style=flat-square&color=24C8D8&label=release)](https://github.com/ARYAN007H/CamDroid/releases/latest)
+[![Release CI](https://img.shields.io/github/actions/workflow/status/ARYAN007H/CamDroid/release.yml?branch=main&style=flat-square&label=release%20CI)](https://github.com/ARYAN007H/CamDroid/actions/workflows/release.yml)
+![Platform](https://img.shields.io/badge/platform-Android%20%2B%20Linux-purple?style=flat-square)
+![Protocol](https://img.shields.io/badge/protocol-v2%20%22CMD2%22-orange?style=flat-square)
+[![License](https://img.shields.io/github/license/ARYAN007H/CamDroid?style=flat-square&color=green)](LICENSE)
+
+</div>
 
 ---
 
-## 🌟 Why CamDroid?
+> 📱 **A phone in your pocket is a better camera than any webcam ever made.**
+> CamDroid streams its hardware-encoded H.264/H.265 + AAC over a purpose-built
+> binary protocol to your Linux desktop — and *CamDroid Studio* turns the whole
+> thing into a control room: looks, rotation, aspect crop, a ring light, live
+> telemetry, and one-click virtual-camera output for OBS, Zoom and Chrome.
 
-**CamDroid** is a free, open-source replacement for apps like DroidCam and Iriun. The phone streams hardware-encoded H.264/H.265 video and AAC audio over a purpose-built binary protocol; the desktop decodes it with FFmpeg and presents it as a real webcam (`v4l2loopback`) to OBS, Zoom, Chrome and friends.
+## 🧩 Three apps, one pipeline
 
-Version 2 ships **CamDroid Studio** — a full desktop control room — on top of a redesigned streaming protocol:
+| | App | What it is |
+| :---: | :--- | :--- |
+| 📱 | **CamDroid** (Android) | The transmitter — a foreground service that opens the camera, hardware-encodes, and speaks protocol v2 on port `4747` |
+| 🎛️ | **CamDroid Studio** (Linux GUI) | The control room — discovery, live stage, filters, rotation & crop, ring light, phone camera controls, virtual webcam |
+| 🎮 | **camdroid-client** (Linux CLI) | The purist path — the same pipeline in your terminal with an interactive `camdroid>` console |
 
-* **CamDroid Studio (GUI):** device discovery, a live stage with looks/filters, rotation, aspect-ratio crop, mirroring, a screen-edge **ring light**, full phone camera controls, live telemetry, and one-click **virtual camera** output.
-* **Protocol v2 (`CMD2`):** 36-byte framed packets with per-stream session IDs, monotonic sequences, and capture timestamps — the receiver's video gate resyncs cleanly on any packet loss instead of stuttering.
-* **Honest capability negotiation:** the phone advertises what its camera *actually* supports (resolution, fps, codecs); the desktop adapts its request instead of failing.
-* **Sender-side congestion control:** when the link can't keep up, the phone sheds stale frames and immediately requests a key frame, so the picture recovers in one GOP.
-* **Adaptive bitrate:** throughput-probe based rate control with manual override.
+<details>
+<summary><b>⚔️ How it stacks up</b></summary>
 
----
+| Feature | **CamDroid 📸** | DroidCam (Free) | DroidCam (Premium) | VDO.ninja |
+| :--- | :---: | :---: | :---: | :---: |
+| Max resolution | 💎 **4K (2160p)** | 480p | 1080p | 1080p |
+| Max frame rate | ⚡ **60 FPS**\* | 30 FPS | 30 FPS | 30 / 60 FPS |
+| Video codecs | **H.264 / H.265 / MJPEG** | H.264 | H.264 | VP8 / VP9 / H.264 |
+| Audio | 🎙️ **AAC-LC (hardware)** | Low-Q mono | Standard mono | Opus |
+| Latency | 🏎️ **~30–50 ms** | ~70–120 ms | ~70–120 ms | ~150–300 ms |
+| Desktop controls | 🎛️ **Studio + CLI** | No | Web UI only | No |
+| Packet-loss policy | 🩹 **Shed + resync + keyframe** | Stutter | Stutter | WebRTC adaptive |
+| Open source | 🔓 **MIT** | No (ads) | No (paid) | Yes |
 
-## ✨ Features
+\* *wherever the phone's camera hardware honestly allows it — see
+[Frame-rate honesty](#-frame-rate-honesty-why-not-always-60).*
 
-### 🎛️ CamDroid Studio (desktop GUI)
-* **Auto-discovery** of phones on the network (mDNS), direct IP, or USB/ADB.
-* **Live stage** with idle-hiding overlays, connection-loss handling, and keyboard shortcuts (`E` looks, `I` adjust, `M` mirror, `Z`/`X` rotate…).
-* **Rotate 90° left/right** and **aspect-ratio crop** (Source / 16:9 / 4:3 / 1:1 / 9:16), applied on the GPU and persisted between runs.
-* **Looks:** colour-grade presets (natural, warm, cool, vivid, mono, VHS, neon edge, cartoon…) with intensity, temperature, saturation and contrast.
-* **Ring light:** a soft screen-border glow that lights your face on dark calls, with brightness, warmth and thickness controls.
-* **Virtual camera:** show up as `/dev/video10` in OBS, Zoom, Teams and browsers with one toggle.
-* **Remote phone controls:** zoom, focus (auto/manual), exposure, white balance, flash, front/rear switch, resolution, fps, codec, bitrate.
-* **Live telemetry:** negotiated mode, render fps, dropped frames, phone battery.
-
-### 🎮 Interactive CLI (same protocol, terminal-native)
-* mDNS discovery, USB (ADB forward) and direct-IP modes.
-* A `camdroid>` console for zoom/focus/exposure/WB/flash/mirror/codec/fps/bitrate/keyframe.
-
-### 📹 Video pipeline
-* Hardware **H.264 (AVC)**, **H.265 (HEVC)** and **MJPEG** encoding via `MediaCodec`.
-* Up to **4K**, with **60 FPS wherever the camera hardware honestly allows it** (constrained high-speed sessions; see [Frame-rate honesty](#-frame-rate-honesty-why-not-always-60)).
-* On-demand keyframes to wipe macroblocking instantly.
-
-### 🎙️ Audio pipeline
-* Hardware **AAC-LC** microphone streaming.
-* Registers as a PulseAudio/PipeWire source (`CamDroid_Microphone`).
+</details>
 
 ---
 
-## 📐 Frame-rate honesty (why not always 60?)
-
-CamDroid never advertises a frame rate the camera can't deliver. Capabilities are read from the HAL:
-`CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` and the constrained high-speed video configuration map. If the
-device exposes a **fixed** `[60,60]` high-speed mode for the chosen resolution, CamDroid opens a
-`SESSION_HIGH_SPEED` session with a properly batched request list and streams 60. Many OEM pipelines
-(e.g. OPPO/realme's `cameraUnit` vendor session) gate their >30 fps modes to their own camera app —
-on those phones CamDroid reports and locks 30 instead of pretending. **30 FPS is always stable, end to end.**
-
----
-
-## 🏗️ Architecture & Data Flow
+## 🗺️ How a frame gets from your pocket to OBS
 
 ```mermaid
 flowchart TD
@@ -81,187 +61,246 @@ flowchart TD
     classDef pc fill:#00E5FF,stroke:#fff,stroke-width:2px,color:#000;
     classDef net fill:#333,stroke:#ccc,stroke-width:1px,color:#fff;
 
-    subgraph Phone ["📱 Android Transmitter"]
-        Camera[Camera2 API] -->|Raw YUV / OES| VEnc[MediaCodec Video Encoder]
-        Mic[AudioRecord] -->|PCM Audio| AEnc[MediaCodec Audio Encoder]
-        VEnc --> Sender[MediaSender<br/>per-kind sequences + shedding]
+    subgraph Phone ["📱 Android transmitter"]
+        Camera[Camera2 API] -->|YUV / OES| VEnc[MediaCodec H.264 · H.265 · MJPEG]
+        Mic[AudioRecord] -->|PCM| AEnc[MediaCodec AAC-LC]
+        VEnc --> Sender[MediaSender<br/>per-kind sequences · shedding]
         AEnc --> Sender
-        Sender -->|CMD2 v2 packets| Server[Custom TCP Server :4747]
-        NSD[NsdManager] -->|Broadcasts _camdroid._tcp| mDNS[Local mDNS]
+        Sender -->|CMD2 packets| Server[TCP server :4747]
+        NSD[NsdManager] -.->_camdroid._tcp.-> mDNS[mDNS]
     end
 
-    Server -->|WiFi TCP / ADB Port Forward| Client["🦀 camdroid-client core<br/>video gate · demux · ABR"]
+    Server -->|WiFi · ADB forward| Core["🦀 camdroid-client core<br/>video gate · demux · ABR"]
 
-    subgraph Desktop ["💻 Linux Desktop"]
-        Client --> VDec[FFmpeg Video Decoder]
-        Client --> ADec[FFmpeg AAC Decoder]
-        VDec --> V4L2[v4l2loopback /dev/video10]
-        ADec --> Pulse[PulseAudio / PipeWire source]
-        Client --> Studio["🎛️ CamDroid Studio (Tauri)"]
-        Client --> CLI[Interactive CLI console]
+    subgraph Desktop ["💻 Linux desktop"]
+        Core --> VDec[FFmpeg video decode] --> V4L2[v4l2loopback /dev/video10]
+        Core --> ADec[FFmpeg AAC decode] --> Pulse[PulseAudio / PipeWire source]
+        Core --> Studio["🎛️ CamDroid Studio"]
+        Core --> CLI[Interactive CLI]
     end
 
-    Studio -->|Camera commands JSON| Client
-    CLI -->|ControlCommand JSON| Client
-    Client -->|TCP Control Socket| Server
-    V4L2 -->|V4L2 Source| Apps["🎥 OBS / Zoom / Discord / Browsers"]
-    Pulse -->|Mic Source| Apps
+    Studio -->|camera commands| Core
+    CLI -->|control commands| Core
+    Core -->|negotiation + controls| Server
+    V4L2 --> Apps[OBS · Zoom · Discord · Browsers]
+    Pulse --> Apps
 
     class Camera,VEnc,Mic,AEnc,Sender,Server,NSD phone;
-    class Client,VDec,ADec,V4L2,Pulse,Studio,CLI,Apps pc;
+    class Core,VDec,ADec,V4L2,Pulse,Studio,CLI,Apps pc;
     class mDNS net;
 ```
 
-**Protocol v2 packet:** `MAGIC "CMD2" · version · kind · flags · session_id (8B) · sequence (8B) · capture timestamp ns (8B) · length (4B) · payload` — kinds for video, audio, control, metadata, heartbeat and codec configs; flags for key frames, configuration units and discontinuities.
+<details>
+<summary><b>📦 Protocol v2 — every packet is framed, sequenced and timestamped</b></summary>
+
+```
+ ┌──────────┬───┬────┬───────┬────────────┬──────────┬───────────────────┬────────┬─────────┐
+ │ "CMD2"   │ v │kind│ flags │ session_id │ sequence │ capture_ts_ns     │ length │ payload │
+ │ 4 bytes  │ 1 │ 1  │ 2     │ 8 bytes    │ 8 bytes  │ 8 bytes           │ 4 bytes│ …       │
+ └──────────┴───┴────┴───────┴────────────┴──────────┴───────────────────┴────────┴─────────┘
+   little-endian · kinds: video · audio · control · metadata · heartbeat · codec configs
+   flags: key frame · configuration unit · discontinuity (resync hint)
+```
+
+- **Per-kind sequence spaces** — audio interleaving can never poke holes in the video
+  sequence, so the receiver's gate admits *every* frame in order.
+- **Sender-side shedding** — when the link falls behind, the phone drops the frames
+  nobody will miss and stamps the next one with a discontinuity + fresh key frame.
+  The picture recovers within one GOP instead of freezing.
+- **Capability negotiation** — the phone advertises what its camera *actually* supports;
+  the desktop resolves its wish against that truth. No "requested mode unavailable" surprises.
+- Full spec: [`protocol/PROTOCOL.md`](protocol/PROTOCOL.md)
+
+</details>
 
 ---
 
-## 🚀 Quick Start Guide
+## ✨ CamDroid Studio
 
-### 1. Desktop dependencies (one-time)
-A helper script sets up FFmpeg dev libraries, `v4l2loopback` with boot-time loading, and build tools:
+<div align="center">
 
-```bash
-cd desktop
-chmod +x setup.sh
-./setup.sh
-```
+`Discover → Connect → You're live.`
 
-> [!NOTE]
-> Supported package managers: `apt` (Ubuntu/Debian), `pacman` (Arch), `dnf` (Fedora). The script configures `/etc/modules-load.d/` and `/etc/modprobe.d/` so `/dev/video10` mounts as **CamDroid** at boot.
+</div>
 
-### 2a. CamDroid Studio (recommended)
+- 🖼️ **A real stage** — idle-hiding overlays like a video player, connection-loss handling, live badge and telemetry
+- 🔄 **Rotate 90° left / right** (`Z` / `X`) and **aspect-ratio crop** — Source, 16:9, 4:3, 1:1, 9:16 — persisted between runs
+- 🪞 **Mirror**, colour-**looks** (natural, warm, vivid, mono, VHS, neon edge, cartoon…) with intensity/temperature/saturation/contrast
+- 💡 **Ring light** — a soft glowing screen border that lights your face on dark calls, with brightness, warmth and thickness
+- 🎥 **Virtual camera** — appear as `/dev/video10` in OBS, Zoom, Teams and browsers with one toggle
+- 📞 **Remote phone controls** — zoom, auto/manual focus, exposure, white balance, flash, front/rear switch, resolution, fps, codec, bitrate
+- 📊 **Live telemetry** — negotiated mode, render fps, dropped frames, phone battery
 
-```bash
-cd desktop-tauri
-npm install
-npm run tauri build     # or: npm run tauri dev for development
-```
+<details>
+<summary><b>⌨️ Keyboard shortcuts</b></summary>
 
-> [!IMPORTANT]
-> The npm `@tauri-apps/api` minor version must match the Rust `tauri` crate minor (this repo pins `2.11.x`). Mismatches hard-fail `tauri build`.
+| Key | Action | | Key | Action |
+| :---: | :--- | --- | :---: | :--- |
+| `E` | Looks tray | | `+` / `-` | Zoom in / out |
+| `I` | Adjust panel | | `0` | Reset zoom |
+| `M` | Mirror | | `C` | Switch front / back camera |
+| `Z` / `X` | Rotate left / right | | `]` / `[` | Next / previous look |
+| `R` | Ring light | | `1–9` | Pick a look |
+| `O` | Virtual camera | | `F` / `F11` | Full screen |
+| `Ctrl+D` | Disconnect | | `?` | All shortcuts |
+| `Ctrl+Q` / `Ctrl+W` | Quit | | `Esc` | Close panel |
 
-The bundles land in `desktop-tauri/src-tauri/target/release/bundle/{deb,rpm}`; the binary itself is `.../release/camdroid-gui`.
+</details>
 
-### 2b. CLI client
+---
 
-```bash
-cd desktop
-cargo build --release
-```
+## ⚖️ Frame-rate honesty (why not always 60?)
 
-### 3. Android app
-Requires **JDK 17** (Kotlin 2.0 rejects JDK 25 toolchains) and the Android SDK.
+CamDroid never advertises a frame rate the camera can't deliver. Capabilities are read
+from the HAL — `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES` plus the constrained high-speed
+configuration map. If the device exposes a **fixed** `[60,60]` high-speed mode for the
+chosen resolution, CamDroid opens a proper `SESSION_HIGH_SPEED` session with a batched
+request list and streams 60.
+
+Many OEM pipelines (e.g. OPPO/realme's `cameraUnit` vendor session) hand their >30 fps
+modes only to their own camera app — third-party apps get `"authentication fails"`.
+On those phones CamDroid reports and **locks a rock-steady 30** instead of pretending.
+No fake badges, no stutter, no lies.
+
+---
+
+## 🚀 Quick start
+
+### 0 · Prerequisites
+
+| You need | For | Notes |
+| :--- | :--- | :--- |
+| Linux + `v4l2loopback` | virtual camera | `desktop/setup.sh` loads and pins it at boot |
+| FFmpeg 9 dev libs | desktop core | preinstalled on Arch; see the CI container for a canonical recipe |
+| Node.js + Rust | Studio build | `@tauri-apps/api` minor must match the Rust crate (pinned) |
+| JDK 17 + Android SDK | Android app | Kotlin 2.0 rejects JDK 25 toolchains |
+
+### 1 · Android transmitter
 
 ```bash
 cd android
 JAVA_HOME=/usr/lib/jvm/java-17-openjdk ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+Open the app, tap the shutter — the server is live on `:4747`.
 
----
+### 2a · CamDroid Studio (recommended)
 
-## 🔌 Running the System
+```bash
+cd desktop-tauri
+npm install
+npm run tauri build        # bundles land in src-tauri/target/release/bundle/
+```
 
-1. Open **CamDroid** on the phone and tap the shutter — the server listens on `:4747`.
-2. On the desktop:
+### 2b · CLI client
+
+```bash
+cd desktop
+cargo build --release
+```
+
+### 3 · Connect
 
 | Mode | Studio | CLI |
 | :--- | :--- | :--- |
-| **USB (ADB)** — lowest latency | pick the device under *USB (ADB)* | `camdroid-client --usb` |
-| **WiFi (auto-discovery)** | pick the device under *WiFi* | `camdroid-client --discover` |
-| **WiFi (direct IP)** | *WiFi (Direct IP)* → enter `ip:4747` | `camdroid-client --connect 192.168.1.67:4747` |
+| **USB (ADB)** — lowest latency ⚡ | pick the device under *USB (ADB)* | `camdroid-client --usb` |
+| **WiFi (auto-discovery)** | pick it under *WiFi* | `camdroid-client --discover` |
+| **WiFi (direct IP)** | *WiFi (Direct IP)* → `ip:4747` | `camdroid-client --connect 192.168.1.67:4747` |
 
 > [!TIP]
-> The phone is authoritative about stream settings: whatever you pick (resolution/fps/codec), the desktop resolves it against the phone's advertised capability and the phone adopts the negotiated mode exactly.
+> Whatever resolution/fps/codec you pick, the desktop resolves it against the phone's
+> advertised capability — on a phone that can't do 60, your request lands on 30
+> automatically instead of failing.
+
+<details>
+<summary><b>🎮 CLI remote-control console</b></summary>
+
+```text
+camdroid> help
+  zoom <value> · focus auto|manual <dist> · exposure <ev> · wb <mode>
+  flash on|off · mirror · camera
+  resolution <res> · fps <value> · codec <c> · bitrate <bps> · keyframe
+  status · help · quit
+```
+
+Macroblocking on a congested network? `keyframe` forces a fresh IDR frame and
+the picture snaps clean. (Studio's sender-side shedding usually beats you to it.)
+
+</details>
 
 ---
 
-## 🎮 CLI Remote Control Console
+## 🤖 Automated releases
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                   CamDroid Remote Control                    │
-├─────────────────────────────────────────────────────────────┤
-│  Camera Controls:                                           │
-│    zoom <value>        Set zoom level (e.g., zoom 2.5)      │
-│    focus auto          Auto focus                           │
-│    focus manual <dist> Manual focus distance (diopters)      │
-│    exposure <ev>       Exposure compensation (-4 to +4 EV)  │
-│    wb <mode>           auto/daylight/tungsten/fluorescent/  │
-│                        cloudy                                │
-│    flash on|off        Toggle flashlight/torch              │
-│    mirror              Toggle horizontal flip               │
-│    camera              Switch front/rear camera             │
-│                                                             │
-│  Stream Controls:                                           │
-│    resolution <res>    Change: 1080p / 1440p / 4k           │
-│    fps <value>         Change: 30 / 60                      │
-│    codec <codec>       Change: h264 / h265 / mjpeg          │
-│    bitrate <bps>       Set bitrate (0 = auto adaptive)      │
-│    keyframe            Request I-frame                      │
-│                                                             │
-│  Other:                                                     │
-│    status              Show stream statistics               │
-│    help                Show this help                       │
-│    quit                Disconnect and exit                  │
-└─────────────────────────────────────────────────────────────┘
+Pushing a tag runs the [release pipeline](.github/workflows/release.yml):
+
+```
+tag v*  ──►  📱 Android APK (ubuntu)      ──┐
+         └─►  🎛️ deb + rpm (Arch container) ─┴─►  GitHub release with artifacts
 ```
 
-> [!TIP]
-> Macroblocking over congested WiFi? Type `keyframe` (or `idr`) to force a fresh independent frame. The Studio's sender-side shedding usually fixes this before you notice.
-
----
-
-## ⚙️ Desktop CLI Arguments Reference
-
-```text
-camdroid-client [OPTIONS]
-
-OPTIONS:
-  -d, --discover            Enable automatic mDNS/NSD discovery (default)
-  -c, --connect <IP:PORT>   Connect directly to a specific IP address and port
-  -u, --usb                 Enable ADB port forwarding and connect via USB
-  --device <PATH>           Path to the virtual webcam [default: /dev/video10]
-  --codec <CODEC>           Encoding selection: h264, h265, mjpeg [default: h264]
-  --resolution <RES>        Video resolution: 1080p, 1440p, 4k [default: 1080p]
-  --fps <FPS>               Video framerate: 30, 60 [default: 60]
-  --no-audio                Disable audio stream decoding
-  --audio-device <NAME>     PulseAudio output source device name [default: CamDroid]
-  -h, --help                Print help information
-```
+The desktop job builds inside an **Arch Linux container** so the FFmpeg 9 +
+webkit2gtk stack matches the environment the releases are verified on — Ubuntu's
+older FFmpeg would break the core. Manual dispatches run the build jobs alone
+as a smoke test.
 
 ---
 
 ## 🛠️ Troubleshooting
 
-### 1. `Virtual camera device: /dev/video10 not found`
-* Verify the module is loaded: `lsmod | grep v4l2loopback`
-* Load it manually with exclusive capabilities (needed by Chrome/Zoom):
-  ```bash
-  sudo modprobe v4l2loopback exclusive_caps=1 video_nr=10 card_label="CamDroid"
-  ```
+<details>
+<summary><b>Virtual camera device /dev/video10 not found</b></summary>
 
-### 2. Virtual microphone missing
-* With PipeWire, make sure the PulseAudio compatibility layer runs:
-  `systemctl --user status pipewire-pulse`
-* Distorted audio usually means the phone microphone permission is missing.
+```bash
+lsmod | grep v4l2loopback        # is it loaded?
+sudo modprobe v4l2loopback exclusive_caps=1 video_nr=10 card_label="CamDroid"
+```
+`exclusive_caps=1` is required by Chrome and Zoom.
+</details>
 
-### 3. USB connection fails
-* USB Debugging must be on (Developer Options) and the phone must not show `unauthorized` in `adb devices`.
-* Stale ADB forwards block port 4747: `adb forward --remove tcp:4747` then reconnect.
+<details>
+<summary><b>Virtual microphone missing</b></summary>
 
-### 4. Phone rejects the stream ("Requested video mode is unavailable")
-* The phone advertises only what its camera truly supports. The desktop normally resolves your
-  request to the closest supported mode automatically; if you still see this, pick a lower
-  resolution or 30 fps in the connect screen.
+With PipeWire, make sure the PulseAudio compatibility layer is running:
+`systemctl --user status pipewire-pulse`. Distorted audio usually means the
+phone-side microphone permission is missing.
+</details>
 
-### 5. Locked at 30 FPS
-* See [Frame-rate honesty](#-frame-rate-honesty-why-not-always-60): the OEM gates >30 fps modes
-  behind its own camera app on some devices. CamDroid locks a rock-steady 30 there by design.
+<details>
+<summary><b>USB connection fails</b></summary>
+
+USB Debugging must be on and authorized (`adb devices` must not show
+`unauthorized`). A stale forward blocks port 4747:
+`adb forward --remove tcp:4747`, then reconnect.
+</details>
+
+<details>
+<summary><b>"Requested video mode is unavailable"</b></summary>
+
+The phone advertises only what its camera truly supports. The desktop resolves
+your request automatically; if you still hit this, pick a lower resolution or
+30 fps in the connect screen.
+</details>
+
+<details>
+<summary><b>Locked at 30 FPS</b></summary>
+
+See <a href="#-frame-rate-honesty-why-not-always-60">Frame-rate honesty</a> —
+the OEM gates &gt;30 fps modes behind its own camera app on some devices.
+</details>
 
 ---
 
-## 📜 License
+## 🤝 Contributing
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+Issues and PRs welcome — the codebase is small on purpose: a Kotlin app, a Rust
+core, and a Tauri UI. `cargo test` (core), `npm test` (frontend) and
+`./gradlew testDebugUnitTest` (Android) should all stay green.
+
+<div align="center">
+
+**Built for people whose webcam is worse than their phone.** ⭐ the repo if CamDroid made your setup better.
+
+📜 [MIT License](LICENSE)
+
+</div>
