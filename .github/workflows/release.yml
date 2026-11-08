@@ -1,0 +1,97 @@
+name: Release
+
+# Builds the release artifacts the way the v2.1.0 release was built by hand:
+# an Android transmitter APK and CamDroid Studio bundles for Debian/Fedora.
+# Pushing a tag like `v2.1.1` builds and attaches them to a GitHub release;
+# dispatching manually just runs the build jobs as a smoke test.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Name the APK after the release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "CamDroid-${VERSION}-android.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: CamDroid-*-android.apk
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop bundles (deb/rpm)
+    # The desktop core links FFmpeg 9 and the Tauri stack; an Arch container
+    # reproduces the environment the releases were verified on (rolling
+    # FFmpeg), instead of chasing the older FFmpeg in Ubuntu images.
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            git rust nodejs npm ffmpeg pkgconf file \
+            webkit2gtk-4.1 libappindicator-gtk3 librsvg openssl
+
+      - uses: actions/checkout@v4
+
+      - name: Build CamDroid Studio
+        working-directory: desktop-tauri
+        run: |
+          npm ci
+          npm run tauri build
+
+      - name: Collect bundles
+        working-directory: desktop-tauri
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          cp src-tauri/target/release/bundle/deb/CamDroid_${VERSION}_amd64.deb \
+             out/ 2>/dev/null || cp src-tauri/target/release/bundle/deb/*.deb out/
+          cp src-tauri/target/release/bundle/rpm/CamDroid-${VERSION}-1.x86_64.rpm \
+             out/ 2>/dev/null || cp src-tauri/target/release/bundle/rpm/*.rpm out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-bundles
+          path: desktop-tauri/out/*
+          if-no-files-found: error
+
+  release:
+    name: Attach artifacts to the release
+    needs: [android, desktop]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
