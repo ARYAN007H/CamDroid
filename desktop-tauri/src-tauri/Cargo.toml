@@ -20,7 +20,10 @@ jpeg-encoder = "0.6"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+# `macos-private-api` is required for the transparent ring-light overlay on
+# macOS; the API is a no-op on other platforms. CamDroid Studio is distributed
+# outside the Mac App Store, so the private API is acceptable here.
+tauri = { version = "2", features = ["macos-private-api"] }
 thiserror = "2"
 
 [profile.release]

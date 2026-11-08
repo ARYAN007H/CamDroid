@@ -161,11 +161,21 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install LLVM, NASM and make
+      - name: Install LLVM
         run: |
-          choco install -y llvm nasm make
+          choco install -y llvm
           "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      # FFmpeg's build system needs a POSIX make/sh/awk. Chocolatey's make
+      # combined with Git Bash mangles the backslashes in FFmpeg's MSVC
+      # dependency command (gsub(/\\/, "/")), so use the MSYS2 toolchain.
+      - name: Set up MSYS2 build tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: false
+          install: make diffutils nasm
+          path-type: inherit
 
       - name: Set up MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
