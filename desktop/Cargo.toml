@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Video/audio decoding via FFmpeg
-ffmpeg-next = "8.1"
+ffmpeg-next = "9.0"
 
 # mDNS service discovery (cross-platform: macOS, Windows, Linux)
 mdns-sd = "0.11"

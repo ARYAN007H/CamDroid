@@ -254,7 +254,7 @@ impl CamdroidSession {
                         match meta_rx.recv_timeout(std::time::Duration::from_millis(250)) {
                             Ok(bytes) => {
                                 if let Ok(status) = serde_json::from_slice::<LiveStatusMetadata>(&bytes) {
-                                    if status.msg_type == "status" || status.battery > 0 {
+                                    if status.r#type == "status" || status.battery > 0 {
                                         if let Ok(mut guard) = telemetry_store.write() {
                                             *guard = status;
                                         }
@@ -279,7 +279,7 @@ impl CamdroidSession {
             channels.video_config_rx,
             channels.video_rx,
             frame_tx,
-            preview_hub.clone(),
+            (*preview_hub).clone(),
             mirror_override.clone(),
             width,
             height,
@@ -417,7 +417,7 @@ impl CamdroidSession {
             } else {
                 self.config.fps as f32
             },
-            bitrate_mbps: telem.bitrate_mbps,
+            bitrate_mbps: telem.bitrate as f32 / 1_000_000.0,
             battery: if telem.battery > 0 {
                 telem.battery
             } else {

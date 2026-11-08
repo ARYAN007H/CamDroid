@@ -116,8 +116,9 @@ pub fn discover_devices(timeout_secs: u64) -> Result<Vec<DiscoveredDevice>> {
                     debug!("mDNS search stopped");
                 }
             },
-            Err(mdns_sd::flume::RecvTimeoutError::Timeout) => continue,
-            Err(_) => break,
+            // Newer mdns-sd no longer re-exports `flume`; the deadline check at the
+            // top of the loop bounds this, so treat every recv error as a poll tick.
+            Err(_) => continue,
         }
     }
 
